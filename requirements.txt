@@ -1,0 +1,32 @@
+# Core data processing and analysis
+pandas>=2.0.0,<3.0.0
+numpy>=1.24.0,<2.0.0
+
+# Database dependencies (SQLite is built into Python)
+SQLAlchemy>=2.0.0,<3.0.0       # SQL toolkit and ORM
+
+# HTTP requests and APIs
+requests>=2.25.0,<3.0.0
+
+# Progress bars and CLI utilities
+tqdm>=4.60.0
+
+# JSON Lines format support
+jsonlines>=3.0.0,<4.0.0
+
+# Tokenization for text length calculation
+tiktoken>=0.5.0,<1.0.0
+
+# Data visualization
+matplotlib>=3.6.0,<4.0.0
+seaborn>=0.12.0,<1.0.0
+
+# Statistical analysis
+statsmodels>=0.14.0,<1.0.0
+scikit-learn>=1.3.0,<2.0.0
+
+# Optional: Excel file handling (for pandas Excel operations)
+openpyxl>=3.0.0,<4.0.0
+
+# Development and testing
+python-dotenv>=1.0.0,<2.0.0    # Environment variable management 
