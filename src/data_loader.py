@@ -7,7 +7,13 @@ import jsonlines
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Optional, List
-from src.constant import DATA_DIR, MSB_JAVA_DIR
+from src.constant import (
+    DATA_DIR,
+    MSB_JAVA_DIR,
+    PATCH_APPLY_OUTPUT_DIR,
+    REFACTORING_DETECTION_OUTPUT_DIR,
+    EVALUATION_LOGS_DIR
+)
 
 
 class TaskDifficultyLoader:
@@ -98,15 +104,15 @@ class IssueTypeLoader:
         
         df = pd.read_excel(self.excel_path)
         
-        # Get the two key columns
+        # Get the key columns
         id_col = '示例id(instance_id)'
-        desc_col = '问题1.1：请根据您的理解简要描述该Issue的具体内容，并说明其属于哪一类型的 Issue（例如 Bug、 \nNew Feature、线程安全问题等，或更细分的类型）'
+        tag_col = '标签'  # Column 4: the actual issue type label
         
         issue_map = {}
         
         for _, row in df.iterrows():
             instance_id = row.get(id_col)
-            description = row.get(desc_col, '')
+            tag = row.get(tag_col, '')
             
             if pd.isna(instance_id):
                 continue
@@ -124,37 +130,38 @@ class IssueTypeLoader:
             else:
                 instance_id_clean = instance_id_str
             
-            # Classify issue type based on description
-            issue_type = self._classify_issue_type(description)
+            # Use the tag column directly and normalize it
+            issue_type = self._normalize_issue_type(tag)
             issue_map[instance_id_clean] = issue_type
         
         self._issue_map = issue_map
         return issue_map
     
-    def _classify_issue_type(self, description: str) -> str:
+    def _normalize_issue_type(self, tag: str) -> str:
         """
-        Classify issue type from description
+        Normalize issue type from tag column
         
         Args:
-            description: Issue description text
+            tag: Issue type tag from Excel
             
         Returns:
-            Issue type category
+            Normalized issue type category
         """
-        if pd.isna(description):
+        if pd.isna(tag):
             return 'unknown'
         
-        desc_lower = str(description).lower()
+        tag_lower = str(tag).strip().lower()
         
-        # Simple keyword-based classification
-        if 'bug' in desc_lower or 'bugfix' in desc_lower or '修复' in desc_lower:
+        # Normalize the tag values from column 4
+        if tag_lower == 'bug fix':
             return 'bug_fix'
-        elif 'feature' in desc_lower or 'new feature' in desc_lower or '新增' in desc_lower or '增加' in desc_lower:
+        elif tag_lower == 'new feature':
             return 'feature'
-        elif 'enhance' in desc_lower or '优化' in desc_lower or '改进' in desc_lower:
+        elif tag_lower == 'feature optimization':
             return 'enhancement'
         else:
-            return 'unknown'
+            # For any unexpected values, return as-is (with spaces replaced by underscores)
+            return tag_lower.replace(' ', '_')
     
     def get_issue_type(self, instance_id: str) -> str:
         """
@@ -183,7 +190,7 @@ class RefactoringDataLoader:
             refactoring_base_dir: Base directory for refactoring results
         """
         if refactoring_base_dir is None:
-            refactoring_base_dir = DATA_DIR / "refactoring_detection_results"
+            refactoring_base_dir = REFACTORING_DETECTION_OUTPUT_DIR
         
         self.base_dir = Path(refactoring_base_dir)
         self.agent_dir = self.base_dir / "agent"
@@ -226,7 +233,7 @@ class PatchDataLoader:
             patch_base_dir: Base directory for patch results
         """
         if patch_base_dir is None:
-            patch_base_dir = DATA_DIR / "patch_apply_results"
+            patch_base_dir = PATCH_APPLY_OUTPUT_DIR
         
         self.base_dir = Path(patch_base_dir)
     
@@ -353,7 +360,7 @@ class CompilationLogLoader:
             eval_logs_base_dir: Base directory for evaluation logs
         """
         if eval_logs_base_dir is None:
-            eval_logs_base_dir = DATA_DIR / "evaluation_logs"
+            eval_logs_base_dir = EVALUATION_LOGS_DIR
         
         self.base_dir = Path(eval_logs_base_dir)
     
@@ -438,7 +445,7 @@ class FinalReportLoader:
             eval_logs_base_dir: Base directory for evaluation logs
         """
         if eval_logs_base_dir is None:
-            eval_logs_base_dir = DATA_DIR / "evaluation_logs"
+            eval_logs_base_dir = EVALUATION_LOGS_DIR
         
         self.base_dir = Path(eval_logs_base_dir)
         self._cache = {}
@@ -526,7 +533,7 @@ class PatchApplyResultsLoader:
             patch_results_base_dir: Base directory for patch apply results
         """
         if patch_results_base_dir is None:
-            patch_results_base_dir = DATA_DIR / "patch_apply_results"
+            patch_results_base_dir = PATCH_APPLY_OUTPUT_DIR
         
         self.base_dir = Path(patch_results_base_dir)
         self._cache = {}

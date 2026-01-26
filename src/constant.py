@@ -26,4 +26,7 @@ REFACTORING_DETECTION_OUTPUT_DIR = DATA_DIR / "refactoring_detection_results"
 AGENT_REFACTORING_OUTPUT_DIR = REFACTORING_DETECTION_OUTPUT_DIR / "agent"
 GOLDEN_REFACTORING_OUTPUT_DIR = REFACTORING_DETECTION_OUTPUT_DIR / "golden"
 
+# Evaluation logs directory (for compilation and final reports)
+EVALUATION_LOGS_DIR = DATA_DIR / "evaluation_logs_new"
+
 TAG_PREFIX = "agent_patch"
