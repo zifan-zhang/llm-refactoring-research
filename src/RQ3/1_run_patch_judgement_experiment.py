@@ -27,7 +27,7 @@ from src.data_loader import (
     RefactoringDataLoader,
     FinalReportLoader,
 )
-from src.RQ3.prompt_template_pack import PromptTemplatePack, PromptMessages
+from src.RQ3.judgement_prompt import PromptTemplatePack, PromptMessages
 
 
 @dataclass
