@@ -7,12 +7,32 @@ Study the basic effect of agent_has_refactoring (binary: Yes/No) on task outcome
 import pandas as pd
 import numpy as np
 import json
+import sys
 from pathlib import Path
 import statsmodels.api as sm
 from sklearn.preprocessing import StandardScaler
 import warnings
 
 warnings.filterwarnings('ignore')
+
+
+class TeeOutput:
+    """Redirect print output to both console and file"""
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log = open(filepath, 'w', encoding='utf-8')
+    
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+    
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+    
+    def close(self):
+        self.log.close()
+        sys.stdout = self.terminal
 
 class SimpleRefactoringAnalysis:
     """Analyze the basic effect of having refactoring"""
@@ -124,6 +144,16 @@ class SimpleRefactoringAnalysis:
     
     def run_analysis(self):
         """Run complete analysis"""
+        # Setup output directory and redirection
+        output_dir = Path("output/RQ2/simple_refactoring_analysis")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        log_file = output_dir / 'analysis_output.txt'
+        tee = TeeOutput(str(log_file))
+        sys.stdout = tee
+        
+        print(f"Output log file: {log_file}")
+        
         self.load_and_preprocess()
         
         print("\n" + "="*80)
@@ -225,6 +255,9 @@ class SimpleRefactoringAnalysis:
         
         # Save results
         self.save_results(results_summary)
+        
+        # Restore stdout and close log file
+        tee.close()
     
     def save_results(self, results_summary):
         """Save results to file"""
@@ -240,6 +273,7 @@ class SimpleRefactoringAnalysis:
         df_results.to_csv(output_dir / 'summary.csv', index=False)
         
         print(f"\nResults saved to {output_dir}/")
+        print(f"  - analysis_output.txt")
         print(f"  - summary.json")
         print(f"  - summary.csv")
 

@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 import json
 import os
+import sys
 import warnings
 from pathlib import Path
 from typing import Tuple, Dict
@@ -25,6 +26,25 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 warnings.filterwarnings('ignore')
+
+
+class TeeOutput:
+    """Redirect print output to both console and file"""
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log = open(filepath, 'w', encoding='utf-8')
+    
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+    
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+    
+    def close(self):
+        self.log.close()
+        sys.stdout = self.terminal
 
 
 class MulticollinearityDiagnoser:
@@ -769,13 +789,19 @@ class MulticollinearityDiagnoser:
         Args:
             output_dir: Directory to save all results and visualizations
         """
+        # Create output directory first
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Setup output redirection to both console and file
+        log_file = os.path.join(output_dir, 'analysis_output.txt')
+        tee = TeeOutput(log_file)
+        sys.stdout = tee
+        
         print("\n" + "="*80)
         print(" "*20 + "MULTICOLLINEARITY DIAGNOSIS TOOL")
         print("="*80)
         print(f"\nOutput directory: {output_dir}")
-        
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
+        print(f"Log file: {log_file}")
         print(f"Created/verified output directory: {output_dir}")
         
         try:
@@ -810,6 +836,7 @@ class MulticollinearityDiagnoser:
             print("="*80)
             print(f"\nAll results saved to: {output_dir}/")
             print("\nGenerated files:")
+            print(f"  - analysis_output.txt                # Terminal output log")
             print(f"  - distribution_analysis.csv          # Variable distributions & skewness")
             print(f"  - transformation_code.py             # Code to copy to modeling script")
             print(f"  - correlation_matrix.csv             # Continuous variable correlations")
@@ -833,6 +860,9 @@ class MulticollinearityDiagnoser:
             print(f"\nError during diagnosis: {e}")
             import traceback
             traceback.print_exc()
+        finally:
+            # Restore stdout and close log file
+            tee.close()
 
 
 def main():

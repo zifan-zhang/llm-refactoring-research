@@ -8,6 +8,7 @@ import argparse
 import pandas as pd
 import numpy as np
 import json
+import sys
 import warnings
 from pathlib import Path
 from typing import Dict, List, Any
@@ -19,6 +20,25 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 warnings.filterwarnings('ignore')
+
+
+class TeeOutput:
+    """Redirect print output to both console and file"""
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log = open(filepath, 'w', encoding='utf-8')
+    
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+    
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+    
+    def close(self):
+        self.log.close()
+        sys.stdout = self.terminal
 
 class RefactoringLogisticAnalysis:
     """Main class for logistic regression analysis"""
@@ -516,6 +536,8 @@ class RefactoringLogisticAnalysis:
         output_dir = Path("output/RQ2/refactoring_logistic_regression")
         output_dir.mkdir(parents=True, exist_ok=True)
         
+        print(f"  - analysis_output.txt")
+        
         # Save detailed results for each model
         for model_name, model_results in self.models.items():
             if model_results is None:
@@ -557,6 +579,16 @@ class RefactoringLogisticAnalysis:
     
     def run_complete_analysis(self):
         """Run combined three-dimensional refactoring analysis"""
+        # Setup output directory and redirection
+        output_dir = Path("output/RQ2/refactoring_logistic_regression")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        log_file = output_dir / 'analysis_output.txt'
+        tee = TeeOutput(str(log_file))
+        sys.stdout = tee
+        
+        print(f"Output log file: {log_file}\n")
+        
         try:
             print("Loading data...")
             self.load_data()
@@ -586,6 +618,9 @@ class RefactoringLogisticAnalysis:
             print(f"Error: {e}")
             import traceback
             traceback.print_exc()
+        finally:
+            # Restore stdout and close log file
+            tee.close()
 
 
 def main():
