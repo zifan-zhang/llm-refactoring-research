@@ -787,6 +787,18 @@ class PatchSelectionExperiment:
             evaluations["refactoring_aware"],
             evaluations["random"]
         )
+        
+        # Print total token usage across all strategies
+        total_input_tokens = sum(eval_stats.total_input_tokens for eval_stats in evaluations.values())
+        total_output_tokens = sum(eval_stats.total_output_tokens for eval_stats in evaluations.values())
+        total_tokens = total_input_tokens + total_output_tokens
+        
+        print("TOTAL TOKEN USAGE (All Strategies)")
+        print("-" * 40)
+        print(f"  Total Input Tokens: {total_input_tokens:,}")
+        print(f"  Total Output Tokens: {total_output_tokens:,}")
+        print(f"  Total Tokens: {total_tokens:,}")
+        print()
     
     def _print_improvement(
         self,
@@ -876,6 +888,15 @@ class PatchSelectionExperiment:
             output["evaluation"]["improvement_vs_random"] = self._compute_improvement_dict(
                 evaluations["refactoring_aware"], evaluations["random"]
             )
+            
+            # Add total token usage
+            total_input_tokens = sum(eval_stats.total_input_tokens for eval_stats in evaluations.values())
+            total_output_tokens = sum(eval_stats.total_output_tokens for eval_stats in evaluations.values())
+            output["evaluation"]["total_token_usage"] = {
+                "total_input_tokens": total_input_tokens,
+                "total_output_tokens": total_output_tokens,
+                "total_tokens": total_input_tokens + total_output_tokens,
+            }
         
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
