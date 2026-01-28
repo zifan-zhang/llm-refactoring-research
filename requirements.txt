@@ -7,6 +7,7 @@ SQLAlchemy>=2.0.0,<3.0.0       # SQL toolkit and ORM
 
 # HTTP requests and APIs
 requests>=2.25.0,<3.0.0
+openai>=2.0.0,<3.0.0              # OpenAI API client for LLM experiments
 
 # Progress bars and CLI utilities
 tqdm>=4.60.0

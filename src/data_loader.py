@@ -220,6 +220,96 @@ class RefactoringDataLoader:
             Path to refactoring JSON file
         """
         return self.golden_dir / f"{instance_id}.json"
+    
+    def load_agent_refactoring_data(self, agent_name: str, instance_id: str) -> Optional[Dict]:
+        """
+        Load agent refactoring data from JSON file
+        
+        Args:
+            agent_name: Name of the agent
+            instance_id: Instance ID
+            
+        Returns:
+            Refactoring data dictionary or None if not found
+        """
+        ref_path = self.get_agent_refactoring_path(agent_name, instance_id)
+        if not ref_path.exists():
+            return None
+        
+        try:
+            with open(ref_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return None
+    
+    def format_refactoring_context(self, agent_name: str, instance_id: str) -> str:
+        """
+        Format refactoring data as context string for LLM prompt
+        
+        Args:
+            agent_name: Name of the agent
+            instance_id: Instance ID
+            
+        Returns:
+            Formatted refactoring context string
+        """
+        ref_data = self.load_agent_refactoring_data(agent_name, instance_id)
+        
+        if not ref_data or 'commits' not in ref_data:
+            return "[no refactoring context available]"
+        
+        lines = []
+        lines.append("The following refactorings were detected in the patch:\n")
+        
+        for commit in ref_data['commits']:
+            refactorings = commit.get('refactorings', [])
+            
+            for i, ref in enumerate(refactorings, 1):
+                ref_type = ref.get('type', 'Unknown')
+                description = ref.get('description', '')
+                
+                lines.append(f"{i}. {ref_type}")
+                lines.append(f"   Description: {description}")
+                
+                # Format left side locations
+                left_locations = ref.get('leftSideLocations', [])
+                if left_locations:
+                    lines.append("   Before:")
+                    for loc in left_locations:
+                        file_path = loc.get('filePath', '')
+                        start_line = loc.get('startLine', '')
+                        end_line = loc.get('endLine', '')
+                        code_element = loc.get('codeElement', '')
+                        loc_desc = loc.get('description', '')
+                        
+                        lines.append(f"     - File: {file_path}")
+                        lines.append(f"       Lines: {start_line}-{end_line}")
+                        if code_element:
+                            lines.append(f"       Element: {code_element}")
+                        if loc_desc:
+                            lines.append(f"       Description: {loc_desc}")
+                
+                # Format right side locations
+                right_locations = ref.get('rightSideLocations', [])
+                if right_locations:
+                    lines.append("   After:")
+                    for loc in right_locations:
+                        file_path = loc.get('filePath', '')
+                        start_line = loc.get('startLine', '')
+                        end_line = loc.get('endLine', '')
+                        code_element = loc.get('codeElement', '')
+                        loc_desc = loc.get('description', '')
+                        
+                        lines.append(f"     - File: {file_path}")
+                        lines.append(f"       Lines: {start_line}-{end_line}")
+                        if code_element:
+                            lines.append(f"       Element: {code_element}")
+                        if loc_desc:
+                            lines.append(f"       Description: {loc_desc}")
+                
+                lines.append("")  # Empty line between refactorings
+        
+        return "\n".join(lines)
 
 
 class PatchDataLoader:
@@ -347,6 +437,46 @@ class GoldenPatchLoader:
         """
         self._ensure_loaded()
         return self._cache.get(instance_id)
+    
+    def get_issue_description(self, instance_id: str) -> str:
+        """
+        Get formatted issue description for an instance
+        
+        Args:
+            instance_id: Instance ID
+            
+        Returns:
+            Formatted issue description string
+        """
+        record = self.get_golden_record(instance_id)
+        
+        if not record:
+            return "[no issue description available]"
+        
+        resolved_issues = record.get('resolved_issues', [])
+        
+        if not resolved_issues:
+            return "[no issue description available]"
+        
+        # Format all resolved issues
+        lines = []
+        for i, issue in enumerate(resolved_issues, 1):
+            issue_number = issue.get('number', 'N/A')
+            issue_title = issue.get('title', 'N/A')
+            issue_body = issue.get('body', '')
+            
+            if len(resolved_issues) > 1:
+                lines.append(f"Issue #{issue_number}: {issue_title}")
+            else:
+                lines.append(f"Issue #{issue_number}: {issue_title}")
+            
+            if issue_body:
+                lines.append(issue_body)
+            
+            if i < len(resolved_issues):
+                lines.append("\n---\n")
+        
+        return "\n".join(lines)
 
 
 class CompilationLogLoader:
