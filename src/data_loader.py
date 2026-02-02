@@ -156,12 +156,11 @@ class IssueTypeLoader:
         if tag_lower == 'bug fix':
             return 'bug_fix'
         elif tag_lower == 'new feature':
-            return 'feature'
+            return 'new_feature'
         elif tag_lower == 'feature optimization':
-            return 'enhancement'
+            return 'feature_optimization'
         else:
-            # For any unexpected values, return as-is (with spaces replaced by underscores)
-            return tag_lower.replace(' ', '_')
+            return 'unknown'
     
     def get_issue_type(self, instance_id: str) -> str:
         """

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Logistic Regression Analysis: Impact of Refactoring on Task Resolution Rate
-Study the impact of three-dimensional refactoring classification on is_issue_solved
+Study the impact of two-dimensional refactoring classification (Action + Scope) on is_issue_solved and is_compile_ok
 """
 
 import argparse
@@ -86,14 +86,7 @@ class RefactoringLogisticAnalysis:
             )
             self.scope_mapping[scope] = refactoring_types
         
-        # Test Interface dimension mapping
-        for affect in ['Yes', 'No']:
-            refactoring_types = set(
-                self.classification_df[
-                    self.classification_df['Can Affect Test Interface？'] == affect
-                ]['Refactoring'].tolist()
-            )
-            self.test_interface_mapping[affect] = refactoring_types
+        # Note: Test Interface dimension is not used in this analysis
     
     def parse_refactoring_types(self, refactoring_str: str) -> set:
         """Parse refactoring types JSON string"""
@@ -128,11 +121,8 @@ class RefactoringLogisticAnalysis:
             )
             print(f"  {col_name}: {self.df[col_name].sum()} instances")
         
-        # Generate has_* variables for Test Interface dimension
-        self.df['has_affects_test_interface'] = self.df['refactoring_types'].apply(
-            lambda types: int(len(types & self.test_interface_mapping['Yes']) > 0)
-        )
-        print(f"  has_affects_test_interface: {self.df['has_affects_test_interface'].sum()} instances")
+        # Note: Test Interface dimension is not used in this analysis
+        # Focus on Action and Scope dimensions only
     
     def preprocess_features(self):
         """Handle confounding variables and feature engineering"""
@@ -279,22 +269,21 @@ class RefactoringLogisticAnalysis:
             return None
     
     def build_models(self):
-        """Build the combined three-dimensional logistic regression models for outcome variables"""
+        """Build two-dimensional (Action + Scope) logistic regression models"""
         self.models = {}
 
-        print("  Building combined three-dimensional refactoring models...")
+        print("  Building two-dimensional refactoring models (Action + Scope)...")
         
-        # Combined model with all dimensions
+        # Combined model with Action + Scope dimensions
         action_vars = ['has_add', 'has_remove', 'has_adjust']
         scope_vars = ['has_method', 'has_class', 'has_local_variable']
-        interface_vars = ['has_affects_test_interface']
-        combined_vars = action_vars + scope_vars + interface_vars
+        combined_vars = action_vars + scope_vars
 
         # Build model for is_issue_solved (always present)
         print("    - Building model for is_issue_solved...")
         self.models['combined_is_issue_solved'] = self.fit_logistic_model(
             combined_vars, 
-            'Combined Three-Dimensional Refactoring Model (Outcome: is_issue_solved)',
+            'Two-Dimensional Refactoring Model (Action + Scope, Outcome: is_issue_solved)',
             outcome_var='is_issue_solved_binary'
         )
         
@@ -303,7 +292,7 @@ class RefactoringLogisticAnalysis:
             print("    - Building model for is_compile_ok...")
             self.models['combined_is_compile_ok'] = self.fit_logistic_model(
                 combined_vars,
-                'Combined Three-Dimensional Refactoring Model (Outcome: is_compile_ok)',
+                'Two-Dimensional Refactoring Model (Action + Scope, Outcome: is_compile_ok)',
                 outcome_var='is_compile_ok_binary'
             )
             
@@ -450,7 +439,6 @@ class RefactoringLogisticAnalysis:
         # Define dimension groupings
         action_vars = ['has_add', 'has_remove', 'has_adjust']
         scope_vars = ['has_method', 'has_class', 'has_local_variable']
-        interface_vars = ['has_affects_test_interface']
 
         # Filter out intercept for cleaner display
         results_no_intercept = detailed_results[detailed_results['Variable'] != 'const'].copy()
@@ -458,10 +446,9 @@ class RefactoringLogisticAnalysis:
         # Treatment variables organized by dimension
         action_results = results_no_intercept[results_no_intercept['Variable'].isin(action_vars)]
         scope_results = results_no_intercept[results_no_intercept['Variable'].isin(scope_vars)]
-        interface_results = results_no_intercept[results_no_intercept['Variable'].isin(interface_vars)]
         
         # All treatment variables
-        all_treatment_results = pd.concat([action_results, scope_results, interface_results])
+        all_treatment_results = pd.concat([action_results, scope_results])
 
         # Control variables
         control_results = results_no_intercept[results_no_intercept['Type'] == 'Control']
@@ -487,21 +474,6 @@ class RefactoringLogisticAnalysis:
             print(f"{'Variable':<30} {'N_Obs':<8} {'Estimate':<12} {'Odds Ratio':<12} {'95% CI':<25} {'P-Value':<12} {'Sig.':<5}")
             print("-" * 80)
             for _, row in scope_results.iterrows():
-                p_val = row['P_value']
-                sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else ""
-                estimate_str = f"{row['Estimate']:.4f}"
-                or_str = f"{row['Odds_Ratio']:.4f}"
-                ci_str = f"[{row['OR_CI_Lower']:.4f}, {row['OR_CI_Upper']:.4f}]"
-                p_formatted = f"{p_val:.4f}" if p_val >= 0.001 else f"{p_val:.2e}"
-                n_obs = f"{row['N_Observations']:,}"
-                print(f"{row['Variable']:<30} {n_obs:<8} {estimate_str:<12} {or_str:<12} {ci_str:<25} {p_formatted:<12} {sig:<5}")
-
-        # Display Test Interface dimension
-        if not interface_results.empty:
-            print(f"\n{'Test Interface Dimension':-^80}")
-            print(f"{'Variable':<30} {'N_Obs':<8} {'Estimate':<12} {'Odds Ratio':<12} {'95% CI':<25} {'P-Value':<12} {'Sig.':<5}")
-            print("-" * 80)
-            for _, row in interface_results.iterrows():
                 p_val = row['P_value']
                 sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else ""
                 estimate_str = f"{row['Estimate']:.4f}"
@@ -578,7 +550,7 @@ class RefactoringLogisticAnalysis:
         print(f"\nResults saved to {output_dir}/")
     
     def run_complete_analysis(self):
-        """Run combined three-dimensional refactoring analysis"""
+        """Run two-dimensional refactoring analysis"""
         # Setup output directory and redirection
         output_dir = Path("output/RQ2/refactoring_logistic_regression")
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -590,7 +562,7 @@ class RefactoringLogisticAnalysis:
         print(f"Output log file: {log_file}\n")
         
         try:
-            print("Loading data...")
+            print("\nLoading data...")
             self.load_data()
             
             print("\nCreating refactoring dimension mappings...")
