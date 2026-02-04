@@ -1,902 +1,616 @@
 """
-Patch Selection Experiment: Baseline vs Refactoring-aware selection
+Patch Selection Experiment: Using pre-computed judgement results
 
-This experiment compares patch selection strategies:
-- Baseline: select based on LLM scoring without refactoring context
-- Refactoring-aware: select based on LLM scoring with refactoring context
+This experiment uses the judgement results from 1_run_patch_selection_experiment.py
+to perform patch selection across 5 runs and compute average metrics.
+
+Strategies:
+- Baseline: select from patches without refactoring context
+- Refactoring-aware: select from patches with refactoring context  
 - Random: randomly select a patch
 
-Goal: Evaluate whether refactoring context helps select better patches that actually resolve issues.
+Selection logic:
+1. Prefer patches judged as "resolves" (random if multiple)
+2. If none, select from "does_not_resolve" patches (random if multiple)
+
+Evaluation uses ground truth labels from unified_data.csv
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import random
-import time
 from collections import defaultdict
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
-import openai
+import numpy as np
 
 from src.constant import DATA_DIR, ROOT_DIR
-from src.data_loader import (
-    GoldenPatchLoader,
-    PatchDataLoader,
-    RefactoringDataLoader,
-    FinalReportLoader,
-)
-from src.RQ3.selection_prompt import PromptTemplatePack, PromptMessages, CodeSnippet
 
 
 @dataclass
-class CandidatePatch:
-    """Single candidate patch in a selection group"""
+class JudgementRecord:
+    """Single judgement record from judgement experiment"""
+    instance_id: str
     agent_name: str
+    condition: str  # "baseline" or "refactoring_aware"
+    prediction: str  # "resolves" or "does_not_resolve"
+    confidence: str
+    true_label: str
+
+
+@dataclass
+class GroundTruthRecord:
+    """Ground truth record from unified_data.csv"""
+    instance_id: str
+    agent_name: str
+    llm_model: str
     agent_framework: str
-    patch_diff: str
-    refactoring_context: str
-    has_refactoring: bool
-    # Ground truth labels
     is_resolved: bool
     is_compilable: bool
     file_coverage: float
     line_coverage: float
-
-
-@dataclass
-class SelectionInput:
-    """Input data for a patch selection task"""
-    instance_id: str
-    llm_model: str
-    issue_description: str
-    code_snippets: List[CodeSnippet]
-    candidates: List[CandidatePatch]
-
-
-@dataclass
-class ScoringResult:
-    """Result of scoring a single candidate"""
-    agent_name: str
-    condition: str  # "baseline" or "refactoring_aware"
-    resolution_score: int  # 0-100
-    patch_resolution: str  # "resolves" or "does_not_resolve"
-    confidence: str
-    reasoning: str
-    raw_response: str
-    input_tokens: int
-    output_tokens: int
 
 
 @dataclass
 class SelectionResult:
-    """Result of a selection decision"""
+    """Result of a single selection decision"""
+    run_id: int
     instance_id: str
     llm_model: str
     strategy: str  # "baseline", "refactoring_aware", or "random"
     selected_agent: str
-    # Selected patch ground truth
+    selected_prediction: Optional[str]  # None for random
+    # Ground truth metrics
     is_resolved: bool
     is_compilable: bool
     file_coverage: float
     line_coverage: float
-    # Candidate info
+    # Metadata
     num_candidates: int
-    num_frameworks: int
-    # Scoring details (for non-random strategies)
-    scoring_results: Optional[List[ScoringResult]] = None
+    num_resolves: Optional[int]  # None for random
+    num_does_not_resolve: Optional[int]  # None for random
 
 
 @dataclass
 class SelectionStats:
-    """Statistics for a selection strategy"""
+    """Aggregate statistics for a strategy"""
     strategy: str
     num_selections: int
-    # Resolution metrics
+    # Main metrics
     resolution_rate: float
     compilation_rate: float
     avg_file_coverage: float
     avg_line_coverage: float
-    # Classification metrics (TP/FP/TN/FN with resolved as positive)
-    tp: int  # Correctly selected resolved
-    fp: int  # Selected unresolved thinking it's resolved
-    tn: int  # Correctly identified as unresolved
-    fn: int  # Missed resolved patches
-    precision: float
-    recall: float
-    f1_score: float
-    # Token usage (for LLM-based strategies)
-    total_input_tokens: int
-    total_output_tokens: int
+    # Standard deviations across runs
+    resolution_rate_std: float
+    compilation_rate_std: float
+    avg_file_coverage_std: float
+    avg_line_coverage_std: float
 
 
 class PatchSelectionExperiment:
-    """Main experiment class for patch selection comparison"""
-    
-    @staticmethod
-    def _create_empty_stats() -> Dict:
-        """Create an empty statistics dictionary"""
-        return {
-            'tp': 0, 'fp': 0, 'tn': 0, 'fn': 0,
-            'total_resolved': 0, 'total_compiled': 0, 
-            'total_file_coverage': 0.0, 'total_line_coverage': 0.0,
-            'total_input_tokens': 0, 'total_output_tokens': 0
-        }
+    """Main experiment class for patch selection using judgement results"""
     
     def __init__(
         self,
-        api_key: str,
-        model: str = "deepseek-chat",
-        base_url: str = "https://api.deepseek.com",
-        selection_size: int = 3,
-        include_code_context: bool = False,
-        output_dir: Optional[Path] = None,
+        judgement_dir: Path,
+        output_dir: Path,
+        seed: int = 42,
     ):
         """
         Initialize experiment
         
         Args:
-            api_key: OpenAI API key
-            model: Model name to use
-            base_url: API base URL
-            selection_size: Minimum number of candidates required
-            include_code_context: Whether to include code context in prompts
-            output_dir: Output directory for results
+            judgement_dir: Directory containing judgement results
+            output_dir: Output directory for selection results
+            seed: Random seed for reproducibility
         """
-        self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
-        self.model = model
-        self.selection_size = max(2, selection_size)
-        self.include_code_context = include_code_context
-        
-        if output_dir is None:
-            output_dir = ROOT_DIR / "output" / "RQ3" / "selection_experiment_results"
-        self.output_dir = Path(output_dir)
+        self.judgement_dir = judgement_dir
+        self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize data loaders
-        self.golden_loader = GoldenPatchLoader()
-        self.patch_loader = PatchDataLoader()
-        self.refactoring_loader = RefactoringDataLoader()
-        self.report_loader = FinalReportLoader()
+        random.seed(seed)
+        np.random.seed(seed)
         
-        # Initialize prompt template pack
-        self.prompt_pack = PromptTemplatePack()
+        # Load ground truth data
+        self.ground_truth = self._load_ground_truth()
+        print(f"Loaded {len(self.ground_truth)} ground truth records")
         
         # Results storage
-        self.results: List[SelectionResult] = []
-        
-        # Statistics (use dict to reduce duplication)
-        self.stats = {
-            'baseline': self._create_empty_stats(),
-            'refactoring_aware': self._create_empty_stats(),
-            'random': self._create_empty_stats(),
-        }
+        self.all_results: List[SelectionResult] = []
     
-    def load_and_group_dataset(self, limit: Optional[int] = None) -> Dict[Tuple[str, str], List[Dict]]:
+    def _load_ground_truth(self) -> Dict[Tuple[str, str], GroundTruthRecord]:
         """
-        Load dataset and group by (instance_id, llm_model)
+        Load ground truth data from unified_data.csv
         
-        Args:
-            limit: Maximum number of groups to return (None for all)
-            
         Returns:
-            Dictionary mapping (instance_id, llm_model) to list of records
+            Dictionary mapping (instance_id, agent_name) to ground truth record
         """
         csv_path = DATA_DIR / "unified_data.csv"
         df = pd.read_csv(csv_path)
         
-        print(f"Loaded {len(df)} total records from unified_data.csv")
-        
-        # Group by (instance_id, llm_model)
-        grouped = defaultdict(list)
+        ground_truth = {}
         for _, row in df.iterrows():
-            key = (row['instance_id'], row['llm_model'])
-            grouped[key].append(row.to_dict())
-        
-        print(f"Grouped into {len(grouped)} (instance_id, llm_model) combinations")
-        
-        # Apply filtering
-        filtered_groups = {}
-        for key, records in grouped.items():
-            if self._should_include_group(key, records):
-                filtered_groups[key] = records
-        
-        print(f"After filtering: {len(filtered_groups)} groups remain")
-        
-        if limit is not None:
-            # Convert to list, take first N, convert back to dict
-            items = list(filtered_groups.items())[:limit]
-            filtered_groups = dict(items)
-            print(f"Applied limit: {len(filtered_groups)} groups")
-        
-        return filtered_groups
-    
-    def _should_include_group(self, key: Tuple[str, str], records: List[Dict]) -> bool:
-        """
-        Check if a group should be included based on filtering criteria
-        
-        Args:
-            key: (instance_id, llm_model) tuple
-            records: List of records in this group
-            
-        Returns:
-            True if group meets filtering criteria
-        """
-        # Must have at least selection_size candidates
-        if len(records) < self.selection_size:
-            return False
-        
-        # Must have at least 2 different frameworks
-        frameworks = set(r['agent_framework'] for r in records)
-        if len(frameworks) < 2:
-            return False
-        
-        # Must not all be resolved (avoid trivial cases)
-        all_resolved = all(r.get('is_issue_solved', 0) == 1 for r in records)
-        if all_resolved:
-            return False
-        
-        # Must have at least one candidate with refactoring
-        has_any_refactoring = any(r.get('agent_has_refactoring', 0) == 1 for r in records)
-        if not has_any_refactoring:
-            return False
-        
-        return True
-    
-    def _prepare_selection_input(
-        self,
-        key: Tuple[str, str],
-        records: List[Dict]
-    ) -> Optional[SelectionInput]:
-        """
-        Prepare selection input from grouped records
-        
-        Args:
-            key: (instance_id, llm_model) tuple
-            records: List of records in this group
-            
-        Returns:
-            SelectionInput or None if data is incomplete
-        """
-        instance_id, llm_model = key
-        
-        # Get issue description
-        issue_description = self.golden_loader.get_issue_description(instance_id)
-        if not issue_description or issue_description == "[no issue description available]":
-            print(f"  Warning: No issue description for {instance_id}")
-            return None
-        
-        # Get code snippets (留空，按需求先不实现)
-        code_snippets = []
-        
-        # Build candidates
-        candidates = []
-        for record in records:
-            agent_name = record['agent_name']
-            
-            # Get patch diff
-            patch_diff = self.patch_loader.get_agent_patch_content(agent_name, instance_id)
-            if not patch_diff:
-                print(f"  Warning: No patch for {agent_name}/{instance_id}")
-                continue
-            
-            # Get refactoring context
-            refactoring_context = self.refactoring_loader.format_refactoring_context(
-                agent_name, instance_id
+            key = (row['instance_id'], row['agent_name'])
+            ground_truth[key] = GroundTruthRecord(
+                instance_id=row['instance_id'],
+                agent_name=row['agent_name'],
+                llm_model=row['llm_model'],
+                agent_framework=row['agent_framework'],
+                is_resolved=bool(row.get('is_issue_solved', 0) == 1),
+                is_compilable=bool(row.get('is_compile_ok', 0) == 1),
+                file_coverage=float(row.get('file_coverage', 0.0)),
+                line_coverage=float(row.get('line_coverage', 0.0)),
             )
-            has_refactoring = record.get('agent_has_refactoring', 0) == 1
+        
+        return ground_truth
+    
+    def _load_judgement_results(self, result_file: Path) -> List[JudgementRecord]:
+        """
+        Load judgement results from a single result file
+        
+        Args:
+            result_file: Path to judgement result JSON file
             
-            # Get ground truth labels
-            is_resolved = record.get('is_issue_solved', 0) == 1
-            is_compilable = record.get('is_compile_ok', 0) == 1
-            file_coverage = float(record.get('file_coverage', 0.0))
-            line_coverage = float(record.get('line_coverage', 0.0))
-            
-            candidates.append(CandidatePatch(
-                agent_name=agent_name,
-                agent_framework=record['agent_framework'],
-                patch_diff=patch_diff,
-                refactoring_context=refactoring_context,
-                has_refactoring=has_refactoring,
-                is_resolved=is_resolved,
-                is_compilable=is_compilable,
-                file_coverage=file_coverage,
-                line_coverage=line_coverage,
+        Returns:
+            List of judgement records
+        """
+        with open(result_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        records = []
+        for result in data['results']:
+            records.append(JudgementRecord(
+                instance_id=result['instance_id'],
+                agent_name=result['agent_name'],
+                condition=result['condition'],
+                prediction=result['prediction'],
+                confidence=result['confidence'],
+                true_label=result['true_label'],
             ))
         
-        if len(candidates) < self.selection_size:
-            print(f"  Warning: Only {len(candidates)} valid candidates (need {self.selection_size})")
+        return records
+    
+    def _group_judgements_by_instance_llm(
+        self,
+        judgements: List[JudgementRecord]
+    ) -> Dict[Tuple[str, str], List[JudgementRecord]]:
+        """
+        Group judgement records by (instance_id, llm_model)
+        
+        Args:
+            judgements: List of judgement records
+            
+        Returns:
+            Dictionary mapping (instance_id, llm_model) to list of judgements
+        """
+        grouped = defaultdict(list)
+        
+        for record in judgements:
+            # Get llm_model from ground truth
+            key = (record.instance_id, record.agent_name)
+            if key not in self.ground_truth:
+                continue
+            
+            llm_model = self.ground_truth[key].llm_model
+            group_key = (record.instance_id, llm_model)
+            grouped[group_key].append(record)
+        
+        return grouped
+    
+    def _filter_valid_groups(
+        self,
+        grouped: Dict[Tuple[str, str], List[JudgementRecord]]
+    ) -> Dict[Tuple[str, str], List[JudgementRecord]]:
+        """
+        Filter groups to keep only those with:
+        - At least 2 different agent frameworks
+        - At least one baseline and one refactoring_aware judgement
+        
+        Args:
+            grouped: Grouped judgement records
+            
+        Returns:
+            Filtered dictionary
+        """
+        filtered = {}
+        
+        for key, records in grouped.items():
+            instance_id, llm_model = key
+            
+            # Check framework diversity
+            frameworks = set()
+            for record in records:
+                gt_key = (record.instance_id, record.agent_name)
+                if gt_key in self.ground_truth:
+                    frameworks.add(self.ground_truth[gt_key].agent_framework)
+            
+            if len(frameworks) < 2:
+                continue
+            
+            # Check condition diversity
+            conditions = set(r.condition for r in records)
+            if 'baseline' not in conditions or 'refactoring_aware' not in conditions:
+                continue
+            
+            filtered[key] = records
+        
+        return filtered
+    
+    def _select_by_judgement(
+        self,
+        judgements: List[JudgementRecord],
+        condition: str
+    ) -> Optional[JudgementRecord]:
+        """
+        Select a patch based on judgement results
+        
+        Logic:
+        1. Filter judgements by condition (baseline or refactoring_aware)
+        2. Prefer patches judged as "resolves"
+        3. If none, select from "does_not_resolve"
+        4. Random selection if multiple in same category
+        
+        Args:
+            judgements: List of judgement records
+            condition: "baseline" or "refactoring_aware"
+            
+        Returns:
+            Selected judgement record or None if no valid candidates
+        """
+        # Filter by condition
+        candidates = [j for j in judgements if j.condition == condition]
+        if not candidates:
             return None
         
-        return SelectionInput(
-            instance_id=instance_id,
-            llm_model=llm_model,
-            issue_description=issue_description,
-            code_snippets=code_snippets,
-            candidates=candidates,
-        )
-    
-    def _build_selection_messages(
-        self,
-        selection_input: SelectionInput,
-        candidate: CandidatePatch,
-        include_refactoring: bool,
-    ) -> List[Dict[str, str]]:
-        """
-        Build messages for LLM API call to score a candidate
+        # Separate by prediction
+        resolves = [j for j in candidates if j.prediction == 'resolves']
+        does_not_resolve = [j for j in candidates if j.prediction == 'does_not_resolve']
         
-        Args:
-            selection_input: Input data for selection
-            candidate: Candidate to score
-            include_refactoring: Whether to include refactoring context
-            
-        Returns:
-            List of message dictionaries for API
-        """
-        prompt_messages = self.prompt_pack.build_select_judgement_prompt(
-            issue_description=selection_input.issue_description,
-            code_snippets=selection_input.code_snippets if self.include_code_context else None,
-            patch_diff=candidate.patch_diff,
-            refactoring_context=candidate.refactoring_context,
-            include_refactoring_context=include_refactoring,
-        )
-        
-        messages = [
-            {"role": "system", "content": prompt_messages.global_system},
-            {"role": "system", "content": prompt_messages.system},
-            {"role": "user", "content": prompt_messages.user},
-        ]
-        
-        return messages
-    
-    def _call_llm(
-        self,
-        messages: List[Dict[str, str]],
-        max_retries: int = 3,
-    ) -> Tuple[str, int, int]:
-        """
-        Call LLM API with retry logic
-        
-        Args:
-            messages: Messages for API
-            max_retries: Maximum number of retries
-            
-        Returns:
-            Tuple of (response_text, input_tokens, output_tokens)
-        """
-        for attempt in range(max_retries):
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=0.0,
-                    max_tokens=2048,
-                )
-                
-                content = response.choices[0].message.content
-                input_tokens = response.usage.prompt_tokens
-                output_tokens = response.usage.completion_tokens
-                
-                return content, input_tokens, output_tokens
-                
-            except openai.APIError as e:
-                if "context_length_exceeded" in str(e).lower():
-                    print(f"    Context length exceeded, skipping")
-                    raise
-                
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"    API error (attempt {attempt + 1}/{max_retries}): {e}")
-                    print(f"    Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                else:
-                    print(f"    Max retries reached")
-                    raise
-            
-            except Exception as e:
-                print(f"    Unexpected error: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                else:
-                    raise
-        
-        raise RuntimeError("Failed to get LLM response after retries")
-    
-    def _parse_llm_response(self, response_text: str) -> Dict[str, any]:
-        """
-        Parse LLM response to extract scoring fields
-        
-        Args:
-            response_text: Raw response text from LLM
-            
-        Returns:
-            Dictionary with parsed fields including resolution_score
-        """
-        import re
-        
-        # Extract JSON from markdown code block
-        json_match = re.search(r'```json\s*\n(.*?)\n```', response_text, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1)
+        # Prefer resolves, fallback to does_not_resolve
+        if resolves:
+            return random.choice(resolves)
+        elif does_not_resolve:
+            return random.choice(does_not_resolve)
         else:
-            # Try to find JSON without markdown
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-            else:
-                return {
-                    'resolution_score': None,
-                    'patch_resolution': 'does_not_resolve',
-                    'confidence': 'low',
-                    'reasoning': f'Failed to parse response: {response_text[:200]}...',
-                }
-        
-        try:
-            parsed = json.loads(json_str)
-            
-            # Validate resolution_score is present
-            if 'resolution_score' not in parsed:
-                return {
-                    'resolution_score': None,
-                    'patch_resolution': parsed.get('patch_resolution', 'does_not_resolve'),
-                    'confidence': parsed.get('confidence', 'low'),
-                    'reasoning': 'Missing resolution_score field',
-                }
-            
-            return {
-                'resolution_score': int(parsed['resolution_score']),
-                'patch_resolution': parsed.get('patch_resolution', 'does_not_resolve'),
-                'confidence': parsed.get('confidence', 'low'),
-                'reasoning': parsed.get('reasoning', ''),
-            }
-        except (json.JSONDecodeError, ValueError, KeyError) as e:
-            print(f"    JSON parse error: {e}")
-            return {
-                'resolution_score': None,
-                'patch_resolution': 'does_not_resolve',
-                'confidence': 'low',
-                'reasoning': f'Parse error: {str(e)}',
-            }
+            return None
     
-    def _score_candidates(
-        self,
-        selection_input: SelectionInput,
-        include_refactoring: bool,
-    ) -> List[ScoringResult]:
+    def _select_random(self, judgements: List[JudgementRecord]) -> Optional[JudgementRecord]:
         """
-        Score all candidates using LLM
+        Randomly select a patch from all candidates
         
         Args:
-            selection_input: Input data for selection
-            include_refactoring: Whether to include refactoring context
+            judgements: List of judgement records
             
         Returns:
-            List of scoring results
+            Randomly selected judgement record
         """
-        condition = "refactoring_aware" if include_refactoring else "baseline"
-        scoring_results = []
+        if not judgements:
+            return None
+        return random.choice(judgements)
+    
+    def _run_single_selection(
+        self,
+        run_id: int,
+        grouped: Dict[Tuple[str, str], List[JudgementRecord]]
+    ) -> List[SelectionResult]:
+        """
+        Run selection for all groups in a single judgement file
         
-        for candidate in selection_input.candidates:
-            try:
-                messages = self._build_selection_messages(
-                    selection_input, candidate, include_refactoring
-                )
-                response_text, input_tokens, output_tokens = self._call_llm(messages)
-                parsed = self._parse_llm_response(response_text)
+        Args:
+            run_id: Run identifier (0-4)
+            grouped: Grouped judgement records
+            
+        Returns:
+            List of selection results
+        """
+        results = []
+        
+        for group_key, judgements in grouped.items():
+            instance_id, llm_model = group_key
+            
+            # Count candidates by condition
+            baseline_judgements = [j for j in judgements if j.condition == 'baseline']
+            refactoring_judgements = [j for j in judgements if j.condition == 'refactoring_aware']
+            
+            # Run all three strategies
+            for strategy in ['baseline', 'refactoring_aware', 'random']:
+                if strategy == 'baseline':
+                    selected = self._select_by_judgement(judgements, 'baseline')
+                    if selected:
+                        resolves = [j for j in baseline_judgements if j.prediction == 'resolves']
+                        does_not = [j for j in baseline_judgements if j.prediction == 'does_not_resolve']
+                        num_resolves = len(resolves)
+                        num_does_not_resolve = len(does_not)
+                    else:
+                        num_resolves = None
+                        num_does_not_resolve = None
+                        
+                elif strategy == 'refactoring_aware':
+                    selected = self._select_by_judgement(judgements, 'refactoring_aware')
+                    if selected:
+                        resolves = [j for j in refactoring_judgements if j.prediction == 'resolves']
+                        does_not = [j for j in refactoring_judgements if j.prediction == 'does_not_resolve']
+                        num_resolves = len(resolves)
+                        num_does_not_resolve = len(does_not)
+                    else:
+                        num_resolves = None
+                        num_does_not_resolve = None
+                        
+                else:  # random
+                    selected = self._select_random(judgements)
+                    num_resolves = None
+                    num_does_not_resolve = None
                 
-                # Skip if resolution_score is missing
-                if parsed['resolution_score'] is None:
-                    print(f"    Warning: Invalid response for {candidate.agent_name}, skipping")
+                if selected is None:
                     continue
                 
-                scoring_results.append(ScoringResult(
-                    agent_name=candidate.agent_name,
-                    condition=condition,
-                    resolution_score=parsed['resolution_score'],
-                    patch_resolution=parsed['patch_resolution'],
-                    confidence=parsed['confidence'],
-                    reasoning=parsed['reasoning'],
-                    raw_response=response_text,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                ))
+                # Get ground truth
+                gt_key = (selected.instance_id, selected.agent_name)
+                if gt_key not in self.ground_truth:
+                    continue
                 
-            except Exception as e:
-                print(f"    Failed to score {candidate.agent_name}: {e}")
-                continue
-        
-        return scoring_results
-    
-    def _select_by_score(
-        self,
-        candidates: List[CandidatePatch],
-        scoring_results: List[ScoringResult],
-    ) -> Optional[CandidatePatch]:
-        """
-        Select candidate with highest resolution_score
-        
-        Args:
-            candidates: List of candidates
-            scoring_results: List of scoring results
-            
-        Returns:
-            Selected candidate or None if no valid scores
-        """
-        if not scoring_results:
-            return None
-        
-        # Find highest score(s)
-        max_score = max(sr.resolution_score for sr in scoring_results)
-        top_scorers = [sr for sr in scoring_results if sr.resolution_score == max_score]
-        
-        # If tie, pick randomly
-        selected_result = random.choice(top_scorers)
-        
-        # Find corresponding candidate
-        for candidate in candidates:
-            if candidate.agent_name == selected_result.agent_name:
-                return candidate
-        
-        return None
-    
-    def _select_random(self, candidates: List[CandidatePatch]) -> CandidatePatch:
-        """Randomly select a candidate"""
-        return random.choice(candidates)
-    
-    def _run_selection_strategy(
-        self,
-        selection_input: SelectionInput,
-        strategy: str,
-        num_frameworks: int,
-        include_refactoring: Optional[bool] = None,
-    ) -> Optional[SelectionResult]:
-        """
-        Run a single selection strategy
-        
-        Args:
-            selection_input: Input data for selection
-            strategy: Strategy name ("baseline", "refactoring_aware", or "random")
-            num_frameworks: Number of frameworks in candidates
-            include_refactoring: Whether to include refactoring (None for random)
-            
-        Returns:
-            SelectionResult or None if selection failed
-        """
-        instance_id = selection_input.instance_id
-        llm_model = selection_input.llm_model
-        
-        print(f"  Running {strategy} selection...")
-        
-        try:
-            if strategy == "random":
-                selected = self._select_random(selection_input.candidates)
-                scoring_results = None
-                total_input = 0
-                total_output = 0
-            else:
-                scoring_results = self._score_candidates(selection_input, include_refactoring)
-                selected = self._select_by_score(selection_input.candidates, scoring_results)
+                gt = self.ground_truth[gt_key]
                 
-                if not selected:
-                    print(f"    Failed to select candidate")
-                    return None
+                # Create result
+                result = SelectionResult(
+                    run_id=run_id,
+                    instance_id=instance_id,
+                    llm_model=llm_model,
+                    strategy=strategy,
+                    selected_agent=selected.agent_name,
+                    selected_prediction=selected.prediction if strategy != 'random' else None,
+                    is_resolved=gt.is_resolved,
+                    is_compilable=gt.is_compilable,
+                    file_coverage=gt.file_coverage,
+                    line_coverage=gt.line_coverage,
+                    num_candidates=len(judgements),
+                    num_resolves=num_resolves,
+                    num_does_not_resolve=num_does_not_resolve,
+                )
                 
-                total_input = sum(sr.input_tokens for sr in scoring_results)
-                total_output = sum(sr.output_tokens for sr in scoring_results)
-            
-            result = SelectionResult(
-                instance_id=instance_id,
-                llm_model=llm_model,
-                strategy=strategy,
-                selected_agent=selected.agent_name,
-                is_resolved=selected.is_resolved,
-                is_compilable=selected.is_compilable,
-                file_coverage=selected.file_coverage,
-                line_coverage=selected.line_coverage,
-                num_candidates=len(selection_input.candidates),
-                num_frameworks=num_frameworks,
-                scoring_results=scoring_results,
-            )
-            
-            self._update_stats(self.stats[strategy], selected, total_input, total_output)
-            print(f"    Selected: {selected.agent_name} (resolved: {selected.is_resolved})")
-            
-            return result
-            
-        except Exception as e:
-            print(f"  {strategy.capitalize()} selection failed: {e}")
-            return None
+                results.append(result)
+        
+        return results
     
-    def _update_stats(
+    def _compute_stats_per_run(
         self,
-        stats_dict: Dict,
-        selected: CandidatePatch,
-        input_tokens: int = 0,
-        output_tokens: int = 0,
-    ):
+        results: List[SelectionResult],
+        strategy: str
+    ) -> Dict[str, float]:
         """
-        Update statistics for a selection
+        Compute statistics for a single run and strategy
         
         Args:
-            stats_dict: Statistics dictionary to update
-            selected: Selected candidate
-            input_tokens: Total input tokens used
-            output_tokens: Total output tokens used
-        """
-        # Update resolution/compile/coverage metrics
-        if selected.is_resolved:
-            stats_dict['total_resolved'] += 1
-            stats_dict['tp'] += 1
-        else:
-            stats_dict['fp'] += 1
-        
-        if selected.is_compilable:
-            stats_dict['total_compiled'] += 1
-        
-        stats_dict['total_file_coverage'] += selected.file_coverage
-        stats_dict['total_line_coverage'] += selected.line_coverage
-        stats_dict['total_input_tokens'] += input_tokens
-        stats_dict['total_output_tokens'] += output_tokens
-    
-    def _compute_metrics(self, stats_dict: Dict, num_samples: int, strategy: str) -> SelectionStats:
-        """
-        Compute evaluation metrics from statistics
-        
-        Args:
-            stats_dict: Statistics dictionary
-            num_samples: Total number of selections
+            results: List of selection results
             strategy: Strategy name
             
         Returns:
-            SelectionStats object
+            Dictionary of metrics
         """
-        tp = stats_dict['tp']
-        fp = stats_dict['fp']
-        tn = stats_dict['tn']
-        fn = stats_dict['fn']
+        strategy_results = [r for r in results if r.strategy == strategy]
         
-        resolution_rate = stats_dict['total_resolved'] / num_samples if num_samples > 0 else 0.0
-        compilation_rate = stats_dict['total_compiled'] / num_samples if num_samples > 0 else 0.0
-        avg_file_coverage = stats_dict['total_file_coverage'] / num_samples if num_samples > 0 else 0.0
-        avg_line_coverage = stats_dict['total_line_coverage'] / num_samples if num_samples > 0 else 0.0
+        if not strategy_results:
+            return {
+                'num_selections': 0,
+                'resolution_rate': 0.0,
+                'compilation_rate': 0.0,
+                'avg_file_coverage': 0.0,
+                'avg_line_coverage': 0.0,
+            }
         
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+        num_selections = len(strategy_results)
+        num_resolved = sum(1 for r in strategy_results if r.is_resolved)
+        num_compiled = sum(1 for r in strategy_results if r.is_compilable)
+        total_file_coverage = sum(r.file_coverage for r in strategy_results)
+        total_line_coverage = sum(r.line_coverage for r in strategy_results)
+        
+        return {
+            'num_selections': num_selections,
+            'resolution_rate': num_resolved / num_selections,
+            'compilation_rate': num_compiled / num_selections,
+            'avg_file_coverage': total_file_coverage / num_selections,
+            'avg_line_coverage': total_line_coverage / num_selections,
+        }
+    
+    def _compute_aggregate_stats(
+        self,
+        all_results: List[SelectionResult],
+        strategy: str
+    ) -> SelectionStats:
+        """
+        Compute aggregate statistics across all runs
+        
+        Args:
+            all_results: All selection results from all runs
+            strategy: Strategy name
+            
+        Returns:
+            SelectionStats with mean and std
+        """
+        # Get unique run IDs
+        run_ids = sorted(set(r.run_id for r in all_results))
+        
+        # Compute per-run stats
+        per_run_stats = []
+        for run_id in run_ids:
+            run_results = [r for r in all_results if r.run_id == run_id]
+            stats = self._compute_stats_per_run(run_results, strategy)
+            per_run_stats.append(stats)
+        
+        # Compute mean and std
+        num_selections = int(np.mean([s['num_selections'] for s in per_run_stats]))
+        
+        resolution_rates = [s['resolution_rate'] for s in per_run_stats]
+        compilation_rates = [s['compilation_rate'] for s in per_run_stats]
+        file_coverages = [s['avg_file_coverage'] for s in per_run_stats]
+        line_coverages = [s['avg_line_coverage'] for s in per_run_stats]
         
         return SelectionStats(
             strategy=strategy,
-            num_selections=num_samples,
-            resolution_rate=resolution_rate,
-            compilation_rate=compilation_rate,
-            avg_file_coverage=avg_file_coverage,
-            avg_line_coverage=avg_line_coverage,
-            tp=tp,
-            fp=fp,
-            tn=tn,
-            fn=fn,
-            precision=precision,
-            recall=recall,
-            f1_score=f1_score,
-            total_input_tokens=stats_dict['total_input_tokens'],
-            total_output_tokens=stats_dict['total_output_tokens'],
+            num_selections=num_selections,
+            resolution_rate=float(np.mean(resolution_rates)),
+            compilation_rate=float(np.mean(compilation_rates)),
+            avg_file_coverage=float(np.mean(file_coverages)),
+            avg_line_coverage=float(np.mean(line_coverages)),
+            resolution_rate_std=float(np.std(resolution_rates)),
+            compilation_rate_std=float(np.std(compilation_rates)),
+            avg_file_coverage_std=float(np.std(file_coverages)),
+            avg_line_coverage_std=float(np.std(line_coverages)),
         )
     
-    def run(self, limit: Optional[int] = None):
-        """
-        Run the complete experiment
-        
-        Args:
-            limit: Maximum number of groups to process
-        """
+    def run(self):
+        """Run the complete experiment across all judgement files"""
         print("=" * 80)
-        print("Patch Selection Experiment: Baseline vs Refactoring-aware vs Random")
+        print("Patch Selection Experiment: Using Judgement Results")
         print("=" * 80)
-        print(f"Model: {self.model}")
-        print(f"Selection size: {self.selection_size}")
-        print(f"Include code context: {self.include_code_context}")
+        print(f"Judgement directory: {self.judgement_dir}")
         print(f"Output directory: {self.output_dir}")
         print()
         
-        # Load and group dataset
-        grouped_data = self.load_and_group_dataset(limit=limit)
+        # Find all judgement result files
+        result_files = sorted(self.judgement_dir.glob("results_final_*.json"))
+        print(f"Found {len(result_files)} judgement result files:")
+        for f in result_files:
+            print(f"  - {f.name}")
         print()
         
-        # Process each group
-        for i, (key, records) in enumerate(grouped_data.items(), 1):
-            instance_id, llm_model = key
-            print(f"[{i}/{len(grouped_data)}] Processing {instance_id} / {llm_model}")
-            print(f"  Candidates: {len(records)}")
-            
-            # Prepare selection input
-            selection_input = self._prepare_selection_input(key, records)
-            if selection_input is None:
-                print(f"  Skipping due to missing data")
-                print()
-                continue
-            
-            num_frameworks = len(set(c.agent_framework for c in selection_input.candidates))
-            print(f"  Valid candidates: {len(selection_input.candidates)} from {num_frameworks} frameworks")
-            
-            # Run all three strategies
-            for strategy, include_refactoring in [
-                ("baseline", False),
-                ("refactoring_aware", True),
-                ("random", None),
-            ]:
-                result = self._run_selection_strategy(
-                    selection_input, strategy, num_frameworks, include_refactoring
-                )
-                if result:
-                    self.results.append(result)
-            
-            print()
+        if len(result_files) == 0:
+            print("Error: No judgement result files found!")
+            return
         
-        # Compute final metrics
-        evaluations = {}
-        for strategy in ["baseline", "refactoring_aware", "random"]:
-            num_samples = len([r for r in self.results if r.strategy == strategy])
-            evaluations[strategy] = self._compute_metrics(self.stats[strategy], num_samples, strategy)
+        # Process each judgement file as a separate run
+        for run_id, result_file in enumerate(result_files):
+            print(f"Processing run {run_id + 1}/{len(result_files)}: {result_file.name}")
+            
+            # Load judgements
+            judgements = self._load_judgement_results(result_file)
+            print(f"  Loaded {len(judgements)} judgement records")
+            
+            # Group by (instance_id, llm_model)
+            grouped = self._group_judgements_by_instance_llm(judgements)
+            print(f"  Grouped into {len(grouped)} (instance_id, llm_model) combinations")
+            
+            # Filter valid groups
+            filtered = self._filter_valid_groups(grouped)
+            print(f"  After filtering: {len(filtered)} valid groups")
+            
+            # Run selection
+            run_results = self._run_single_selection(run_id, filtered)
+            print(f"  Generated {len(run_results)} selection results")
+            print()
+            
+            self.all_results.extend(run_results)
+        
+        print(f"Total selection results across all runs: {len(self.all_results)}")
+        print()
+        
+        # Compute aggregate statistics
+        print("Computing aggregate statistics...")
+        stats = {}
+        for strategy in ['baseline', 'refactoring_aware', 'random']:
+            stats[strategy] = self._compute_aggregate_stats(self.all_results, strategy)
         
         # Print summary
-        self._print_summary(evaluations)
+        self._print_summary(stats)
         
-        # Save final results
-        self.save_results(intermediate=False, evaluations=evaluations)
+        # Save results
+        self.save_results(stats)
     
-    def _print_summary(self, evaluations: Dict[str, SelectionStats]):
+    def _print_summary(self, stats: Dict[str, SelectionStats]):
         """Print experiment summary"""
         print("=" * 80)
-        print("EXPERIMENT RESULTS")
+        print("EXPERIMENT RESULTS (Averaged across runs)")
         print("=" * 80)
         print()
         
-        # Print individual strategy results
-        for strategy in ["baseline", "refactoring_aware", "random"]:
-            eval_stats = evaluations[strategy]
-            print(f"{eval_stats.strategy.upper().replace('_', ' ')}")
+        for strategy in ['baseline', 'refactoring_aware', 'random']:
+            s = stats[strategy]
+            print(f"{s.strategy.upper().replace('_', ' ')}")
             print("-" * 40)
-            print(f"  Selections: {eval_stats.num_selections}")
-            print(f"  Resolution rate: {eval_stats.resolution_rate:.3f}")
-            print(f"  Compilation rate: {eval_stats.compilation_rate:.3f}")
-            print(f"  Avg file coverage: {eval_stats.avg_file_coverage:.3f}")
-            print(f"  Avg line coverage: {eval_stats.avg_line_coverage:.3f}")
-            print(f"  Classification metrics:")
-            print(f"    Precision: {eval_stats.precision:.3f}")
-            print(f"    Recall: {eval_stats.recall:.3f}")
-            print(f"    F1 Score: {eval_stats.f1_score:.3f}")
-            print(f"    TP: {eval_stats.tp}  FP: {eval_stats.fp}")
-            print(f"    FN: {eval_stats.fn}  TN: {eval_stats.tn}")
-            if eval_stats.total_input_tokens > 0:
-                print(f"  Token usage:")
-                print(f"    Input: {eval_stats.total_input_tokens:,}")
-                print(f"    Output: {eval_stats.total_output_tokens:,}")
+            print(f"  Num selections: {s.num_selections}")
+            print(f"  Resolution rate: {s.resolution_rate:.4f} ± {s.resolution_rate_std:.4f}")
+            print(f"  Compilation rate: {s.compilation_rate:.4f} ± {s.compilation_rate_std:.4f}")
+            print(f"  Avg file coverage: {s.avg_file_coverage:.4f} ± {s.avg_file_coverage_std:.4f}")
+            print(f"  Avg line coverage: {s.avg_line_coverage:.4f} ± {s.avg_line_coverage_std:.4f}")
             print()
         
         # Print improvements
         self._print_improvement(
             "Refactoring-aware vs Baseline",
-            evaluations["refactoring_aware"],
-            evaluations["baseline"]
+            stats['refactoring_aware'],
+            stats['baseline']
         )
         self._print_improvement(
             "Refactoring-aware vs Random",
-            evaluations["refactoring_aware"],
-            evaluations["random"]
+            stats['refactoring_aware'],
+            stats['random']
         )
-        
-        # Print total token usage across all strategies
-        total_input_tokens = sum(eval_stats.total_input_tokens for eval_stats in evaluations.values())
-        total_output_tokens = sum(eval_stats.total_output_tokens for eval_stats in evaluations.values())
-        total_tokens = total_input_tokens + total_output_tokens
-        
-        print("TOTAL TOKEN USAGE (All Strategies)")
-        print("-" * 40)
-        print(f"  Total Input Tokens: {total_input_tokens:,}")
-        print(f"  Total Output Tokens: {total_output_tokens:,}")
-        print(f"  Total Tokens: {total_tokens:,}")
-        print()
+        self._print_improvement(
+            "Baseline vs Random",
+            stats['baseline'],
+            stats['random']
+        )
     
     def _print_improvement(
         self,
         title: str,
-        eval_a: SelectionStats,
-        eval_b: SelectionStats,
+        stats_a: SelectionStats,
+        stats_b: SelectionStats
     ):
-        """Print improvement comparison between two evaluations"""
+        """Print improvement comparison"""
         print(f"IMPROVEMENT ({title})")
         print("-" * 40)
-        print(f"  Resolution rate: {eval_a.resolution_rate - eval_b.resolution_rate:+.3f}")
-        print(f"  Compilation rate: {eval_a.compilation_rate - eval_b.compilation_rate:+.3f}")
-        print(f"  Avg file coverage: {eval_a.avg_file_coverage - eval_b.avg_file_coverage:+.3f}")
-        print(f"  Avg line coverage: {eval_a.avg_line_coverage - eval_b.avg_line_coverage:+.3f}")
-        print(f"  Precision: {eval_a.precision - eval_b.precision:+.3f}")
-        print(f"  Recall: {eval_a.recall - eval_b.recall:+.3f}")
-        print(f"  F1 Score: {eval_a.f1_score - eval_b.f1_score:+.3f}")
+        print(f"  Resolution rate: {stats_a.resolution_rate - stats_b.resolution_rate:+.4f}")
+        print(f"  Compilation rate: {stats_a.compilation_rate - stats_b.compilation_rate:+.4f}")
+        print(f"  Avg file coverage: {stats_a.avg_file_coverage - stats_b.avg_file_coverage:+.4f}")
+        print(f"  Avg line coverage: {stats_a.avg_line_coverage - stats_b.avg_line_coverage:+.4f}")
         print()
     
-    def _compute_improvement_dict(
-        self,
-        eval_a: SelectionStats,
-        eval_b: SelectionStats,
-    ) -> Dict[str, float]:
-        """Compute improvement metrics between two evaluations"""
-        return {
-            "resolution_rate": eval_a.resolution_rate - eval_b.resolution_rate,
-            "compilation_rate": eval_a.compilation_rate - eval_b.compilation_rate,
-            "avg_file_coverage": eval_a.avg_file_coverage - eval_b.avg_file_coverage,
-            "avg_line_coverage": eval_a.avg_line_coverage - eval_b.avg_line_coverage,
-            "precision": eval_a.precision - eval_b.precision,
-            "recall": eval_a.recall - eval_b.recall,
-            "f1_score": eval_a.f1_score - eval_b.f1_score,
-        }
-    
-    def save_results(
-        self,
-        intermediate: bool = False,
-        evaluations: Optional[Dict[str, SelectionStats]] = None,
-    ):
-        """
-        Save experiment results to JSON file
-        
-        Args:
-            intermediate: Whether this is an intermediate save
-            evaluations: Dictionary of evaluation statistics by strategy
-        """
+    def save_results(self, stats: Dict[str, SelectionStats]):
+        """Save experiment results to JSON"""
+        import time
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        
-        if intermediate:
-            filename = f"results_intermediate_{timestamp}.json"
-        else:
-            filename = f"results_final_{timestamp}.json"
-        
-        output_path = self.output_dir / filename
+        output_path = self.output_dir / f"selection_results_{timestamp}.json"
         
         # Convert results to dicts
-        results_data = []
-        for r in self.results:
-            r_dict = asdict(r)
-            # Convert scoring_results if present
-            if r.scoring_results:
-                r_dict['scoring_results'] = [asdict(sr) for sr in r.scoring_results]
-            results_data.append(r_dict)
+        results_data = [asdict(r) for r in self.all_results]
         
         # Build output structure
         output = {
-            "experiment": "patch_selection_baseline_vs_refactoring_vs_random",
-            "model": self.model,
-            "selection_size": self.selection_size,
-            "include_code_context": self.include_code_context,
+            "experiment": "patch_selection_using_judgement_results",
             "timestamp": timestamp,
-            "num_groups": len(self.results) // 3,  # Each group has 3 results
-            "results": results_data,
+            "num_runs": len(set(r.run_id for r in self.all_results)),
+            "total_selections": len(self.all_results),
+            "aggregate_statistics": {
+                strategy: asdict(stat)
+                for strategy, stat in stats.items()
+            },
+            "improvements": {
+                "refactoring_aware_vs_baseline": {
+                    "resolution_rate": stats['refactoring_aware'].resolution_rate - stats['baseline'].resolution_rate,
+                    "compilation_rate": stats['refactoring_aware'].compilation_rate - stats['baseline'].compilation_rate,
+                    "avg_file_coverage": stats['refactoring_aware'].avg_file_coverage - stats['baseline'].avg_file_coverage,
+                    "avg_line_coverage": stats['refactoring_aware'].avg_line_coverage - stats['baseline'].avg_line_coverage,
+                },
+                "refactoring_aware_vs_random": {
+                    "resolution_rate": stats['refactoring_aware'].resolution_rate - stats['random'].resolution_rate,
+                    "compilation_rate": stats['refactoring_aware'].compilation_rate - stats['random'].compilation_rate,
+                    "avg_file_coverage": stats['refactoring_aware'].avg_file_coverage - stats['random'].avg_file_coverage,
+                    "avg_line_coverage": stats['refactoring_aware'].avg_line_coverage - stats['random'].avg_line_coverage,
+                },
+                "baseline_vs_random": {
+                    "resolution_rate": stats['baseline'].resolution_rate - stats['random'].resolution_rate,
+                    "compilation_rate": stats['baseline'].compilation_rate - stats['random'].compilation_rate,
+                    "avg_file_coverage": stats['baseline'].avg_file_coverage - stats['random'].avg_file_coverage,
+                    "avg_line_coverage": stats['baseline'].avg_line_coverage - stats['random'].avg_line_coverage,
+                },
+            },
+            "detailed_results": results_data,
         }
-        
-        if evaluations:
-            output["evaluation"] = {
-                strategy: asdict(eval_stats)
-                for strategy, eval_stats in evaluations.items()
-            }
-            
-            # Add improvement comparisons
-            output["evaluation"]["improvement_vs_baseline"] = self._compute_improvement_dict(
-                evaluations["refactoring_aware"], evaluations["baseline"]
-            )
-            output["evaluation"]["improvement_vs_random"] = self._compute_improvement_dict(
-                evaluations["refactoring_aware"], evaluations["random"]
-            )
-            
-            # Add total token usage
-            total_input_tokens = sum(eval_stats.total_input_tokens for eval_stats in evaluations.values())
-            total_output_tokens = sum(eval_stats.total_output_tokens for eval_stats in evaluations.values())
-            output["evaluation"]["total_token_usage"] = {
-                "total_input_tokens": total_input_tokens,
-                "total_output_tokens": total_output_tokens,
-                "total_tokens": total_input_tokens + total_output_tokens,
-            }
         
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
@@ -906,65 +620,46 @@ class PatchSelectionExperiment:
 
 def main():
     """Main entry point"""
+    import argparse
+    
     parser = argparse.ArgumentParser(
-        description="Run patch selection experiment comparing baseline vs refactoring-aware vs random"
+        description="Run patch selection experiment using pre-computed judgement results"
     )
     parser.add_argument(
-        "--api-key",
+        "--judgement-dir",
         type=str,
-        required=True,
-        help="OpenAI API key"
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="deepseek-chat",
-        help="Model name (default: deepseek-chat)"
-    )
-    parser.add_argument(
-        "--base-url",
-        type=str,
-        default="https://api.deepseek.com",
-        help="API base URL (default: https://api.deepseek.com)"
-    )
-    parser.add_argument(
-        "--selection-size",
-        type=int,
-        default=3,
-        help="Minimum number of candidates required (default: 3, min: 2)"
-    )
-    parser.add_argument(
-        "--include-code-context",
-        action="store_true",
-        help="Include code context in prompts (default: False)"
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
         default=None,
-        help="Limit number of groups to process (default: all)"
+        help="Directory containing judgement results (default: output/RQ3/patch_judgement_experiment_results)"
     )
     parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
-        help="Output directory for results (default: output/RQ3/selection_experiment_results)"
+        help="Output directory for selection results (default: output/RQ3/selection_experiment_results)"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42)"
     )
     
     args = parser.parse_args()
     
-    # Create experiment
+    # Set default paths
+    judgement_dir = Path(args.judgement_dir) if args.judgement_dir else \
+        ROOT_DIR / "output" / "RQ3" / "patch_judgement_experiment_results"
+    output_dir = Path(args.output_dir) if args.output_dir else \
+        ROOT_DIR / "output" / "RQ3" / "selection_experiment_results"
+    
+    # Create and run experiment
     experiment = PatchSelectionExperiment(
-        api_key=args.api_key,
-        model=args.model,
-        base_url=args.base_url,
-        selection_size=args.selection_size,
-        include_code_context=args.include_code_context,
-        output_dir=Path(args.output_dir) if args.output_dir else None,
+        judgement_dir=judgement_dir,
+        output_dir=output_dir,
+        seed=args.seed,
     )
     
-    # Run experiment
-    experiment.run(limit=args.limit)
+    experiment.run()
 
 
 if __name__ == "__main__":
