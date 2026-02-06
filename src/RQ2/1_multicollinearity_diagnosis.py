@@ -165,17 +165,14 @@ class MulticollinearityDiagnoser:
             print(f"  is_compile_ok: {self.df['is_compile_ok_binary'].sum()} success / {len(self.df)} total")
 
         # Apply log transformation to skewed variables (matching modeling script)
-        if 'patch_size' in self.df.columns:
-            self.df['patch_size_log'] = np.log1p(self.df['patch_size'])
+        if 'modified_lines' in self.df.columns:
+            self.df['modified_lines_log'] = np.log1p(self.df['modified_lines'])
+        
+        if 'modified_files' in self.df.columns:
+            self.df['modified_files_log'] = np.log1p(self.df['modified_files'])
         
         if 'issue_length' in self.df.columns:
             self.df['issue_length_log'] = np.log1p(self.df['issue_length'])
-        
-        if 'golden_patch_length' in self.df.columns:
-            self.df['golden_patch_length_log'] = np.log1p(self.df['golden_patch_length'])
-        
-        if 'golden_patch_modified_files' in self.df.columns:
-            self.df['golden_patch_modified_files_log'] = np.log1p(self.df['golden_patch_modified_files'])
         
         # Process RAS variables if included
         if self.include_ras:
@@ -199,9 +196,8 @@ class MulticollinearityDiagnoser:
         self.df_encoded[bool_columns] = self.df_encoded[bool_columns].astype(int)
 
         # Standardize numerical variables (use log-transformed versions)
-        numerical_vars = ['patch_size_log', 'file_coverage', 'line_coverage',
-                         'issue_length_log', 'golden_patch_length_log',
-                         'golden_patch_modified_files_log']
+        numerical_vars = ['modified_lines_log', 'modified_files_log', 'file_coverage', 'line_coverage',
+                         'issue_length_log']
         
         # Note: has_high_ras is binary, not continuous, so no scaling needed
         
@@ -298,9 +294,8 @@ class MulticollinearityDiagnoser:
         print("DISTRIBUTION ANALYSIS: Skewness & Transformation Recommendations")
         print("="*70)
         
-        numerical_vars = ['patch_size', 'file_coverage', 'line_coverage', 
-                         'issue_length', 'golden_patch_length', 
-                         'golden_patch_modified_files']
+        numerical_vars = ['modified_lines', 'modified_files', 'file_coverage', 'line_coverage',
+                         'issue_length']
         
         # Note: has_high_ras is binary, not continuous, so it doesn't need distribution analysis
         
@@ -442,9 +437,8 @@ class MulticollinearityDiagnoser:
         print("PHASE 1: Continuous Variables Correlation Analysis")
         print("="*70)
         
-        numerical_vars = ['patch_size_log', 'file_coverage', 'line_coverage',
-                         'issue_length_log', 'golden_patch_length_log',
-                         'golden_patch_modified_files_log']
+        numerical_vars = ['modified_lines_log', 'modified_files_log', 'file_coverage', 'line_coverage',
+                         'issue_length_log']
         
         # Note: has_high_ras is binary, not continuous, so it's not included in correlation analysis
 
@@ -509,9 +503,8 @@ class MulticollinearityDiagnoser:
         print("PHASE 2: Continuous vs Categorical Association Analysis")
         print("="*70)
         
-        numerical_vars = ['patch_size_log', 'file_coverage', 'line_coverage',
-                         'issue_length_log', 'golden_patch_length_log',
-                         'golden_patch_modified_files_log']
+        numerical_vars = ['modified_lines_log', 'modified_files_log', 'file_coverage', 'line_coverage',
+                         'issue_length_log']
         
         categorical_vars = ['task_difficulty', 'llm_model', 'agent_framework', 'issue_type']
         
@@ -703,9 +696,8 @@ class MulticollinearityDiagnoser:
         recommendations['high_vif_variables'] = high_vif.to_dict('records')
         
         # Check correlation for high VIF continuous variables
-        numerical_vars = ['patch_size_log', 'file_coverage', 'line_coverage',
-                         'issue_length_log', 'golden_patch_length_log',
-                         'golden_patch_modified_files_log']
+        numerical_vars = ['modified_lines_log', 'modified_files_log', 'file_coverage', 'line_coverage',
+                         'issue_length_log']
         
         # Note: has_high_ras is binary, not continuous, so it's not included in correlation checks
         

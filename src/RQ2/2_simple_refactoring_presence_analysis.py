@@ -87,9 +87,9 @@ class SimpleRefactoringAnalysis:
         
         # Apply transformations and encoding (same as other scripts)
         print(f"\nApplying transformations...")
-        self.df['patch_size_log'] = np.log1p(self.df['patch_size'])
+        self.df['modified_lines_log'] = np.log1p(self.df['modified_lines'])
+        self.df['modified_files_log'] = np.log1p(self.df['modified_files'])
         self.df['issue_length_log'] = np.log1p(self.df['issue_length'])
-        self.df['golden_patch_length_log'] = np.log1p(self.df['golden_patch_length'])
         
         # One-hot encode categorical variables
         categorical_vars = ['task_difficulty', 'llm_model', 'agent_framework', 'issue_type']
@@ -105,8 +105,8 @@ class SimpleRefactoringAnalysis:
         self.df_encoded[bool_columns] = self.df_encoded[bool_columns].astype(int)
         
         # Standardize numerical variables
-        numerical_vars = ['patch_size_log', 'file_coverage', 'line_coverage', 
-                         'issue_length_log', 'golden_patch_length_log']
+        numerical_vars = ['modified_lines_log', 'modified_files_log', 'file_coverage', 'line_coverage',
+                         'issue_length_log']
         scaler = StandardScaler()
         for var in numerical_vars:
             if var in self.df_encoded.columns:

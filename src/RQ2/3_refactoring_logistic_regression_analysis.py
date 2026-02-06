@@ -145,25 +145,24 @@ class RefactoringLogisticAnalysis:
             print(f"    - is_issue_solved: {self.df['is_issue_solved_binary'].sum()} resolved / {len(self.df)} total")
 
         # Apply log transformation to skewed variables
-        if 'patch_size' in self.df.columns:
-            self.df['patch_size_log'] = np.log1p(self.df['patch_size'])
-            print(f"  Applied log transformation to patch_size")
+        if 'modified_lines' in self.df.columns:
+            self.df['modified_lines_log'] = np.log1p(self.df['modified_lines'])
+            print(f"  Applied log transformation to modified_lines")
+        if 'modified_files' in self.df.columns:
+            self.df['modified_files_log'] = np.log1p(self.df['modified_files'])
+            print(f"  Applied log transformation to modified_files")
 
         if 'issue_length' in self.df.columns:
             self.df['issue_length_log'] = np.log1p(self.df['issue_length'])
             print(f"  Applied log transformation to issue_length")
 
-        if 'golden_patch_length' in self.df.columns:
-            self.df['golden_patch_length_log'] = np.log1p(self.df['golden_patch_length'])
-            print(f"  Applied log transformation to golden_patch_length")
-
         # Define numerical variables
         numerical_vars = [
-            'patch_size_log',
+            'modified_lines_log',
+            'modified_files_log',
             'file_coverage',
             'line_coverage',
-            'issue_length_log',
-            'golden_patch_length_log'
+            'issue_length_log'
         ]
 
         # One-hot encode categorical variables

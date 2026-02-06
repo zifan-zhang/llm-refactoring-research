@@ -31,8 +31,7 @@ class RefactoringInfo:
 IDENTIFIER_FIELDS = ['instance_id', 'agent_name', 'org', 'repo']
 CATEGORICAL_VARS = ['task_difficulty', 'llm_model', 'agent_framework', 'issue_type']
 NUMERICAL_VARS = [
-    'issue_length', 'patch_size', 'file_coverage', 'line_coverage',
-    'golden_patch_length', 'golden_patch_modified_files'
+    'issue_length', 'modified_lines', 'modified_files', 'file_coverage', 'line_coverage'
 ]
 RESULT_VARS = [
     'num_turns', 'monetary_cost', 'input_token_consumption', 'output_token_consumption'
@@ -60,11 +59,10 @@ class UnifiedDataRow:
     agent_framework: str
     issue_type: str
     issue_length: int
-    patch_size: int
+    modified_lines: int
+    modified_files: int
     file_coverage: float
     line_coverage: float
-    golden_patch_length: int
-    golden_patch_modified_files: int
     
     # ===== D. Result Variable Fields (6 variables) =====
     num_turns: int
@@ -290,26 +288,11 @@ class UnifiedDataBuilder:
         ref_path = self.refactoring_loader.get_golden_refactoring_path(instance_id)
         return self._load_refactoring_info(ref_path)
     
-    def load_patch_size(self, agent_name: str, instance_id: str) -> int:
-        """Load patch size for agent"""
-        from src.utils.patch_utils import get_patch_size
-        
-        patch_path = self.patch_loader.get_patch_path(agent_name, instance_id)
-        return get_patch_size(str(patch_path))
-    
-    def load_golden_patch_info(self, instance_id: str) -> Tuple[int, int]:
-        """Load golden patch information (patch_length, modified_files_count)"""
-        from src.utils.patch_utils import parse_patch_content, get_modified_files_set
-        
-        golden_patch = self.golden_patch_loader.get_golden_patch(instance_id)
-        
-        if not golden_patch:
-            return 0, 0
-        
-        stats = parse_patch_content(golden_patch)
-        modified_files = get_modified_files_set(golden_patch)
-        
-        return stats['patch_size'], len(modified_files)
+    def load_agent_patch_stats(self, agent_name: str, instance_id: str) -> Tuple[int, int]:
+        """Load agent patch stats: (modified_lines, modified_files). modified_lines = added + deleted lines."""
+        modified_lines = self.patch_loader.get_modified_lines(agent_name, instance_id)
+        modified_files = self.patch_loader.get_modified_files(agent_name, instance_id)
+        return modified_lines, modified_files
     
     def calculate_coverage(self, agent_name: str, instance_id: str) -> Tuple[float, float]:
         """Calculate file and line coverage between agent and golden patches"""
@@ -441,8 +424,7 @@ def build_complete_dataset(builder: UnifiedDataBuilder) -> None:
                 task_difficulty = builder.load_task_difficulty(instance_id)
                 issue_type = builder.load_issue_type(instance_id)
                 issue_length = builder.load_issue_length(instance_id)
-                patch_size = builder.load_patch_size(agent_name, instance_id)
-                golden_patch_length, golden_modified_files = builder.load_golden_patch_info(instance_id)
+                modified_lines, modified_files = builder.load_agent_patch_stats(agent_name, instance_id)
                 file_cov, line_cov = builder.calculate_coverage(agent_name, instance_id)
                 is_compile_ok = builder.load_is_compile_ok(agent_name, instance_id)
                 is_issue_solved = builder.load_is_issue_solved(agent_name, instance_id)
@@ -471,11 +453,10 @@ def build_complete_dataset(builder: UnifiedDataBuilder) -> None:
                     agent_framework=agent_framework,
                     issue_type=issue_type,
                     issue_length=issue_length,
-                    patch_size=patch_size,
+                    modified_lines=modified_lines,
+                    modified_files=modified_files,
                     file_coverage=file_cov,
                     line_coverage=line_cov,
-                    golden_patch_length=golden_patch_length,
-                    golden_patch_modified_files=golden_modified_files,
                     
                     # D. Result variables (TODO: load from agent trajectory for some fields)
                     num_turns=0,  # TODO: load from agent trajectory
