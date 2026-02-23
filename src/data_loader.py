@@ -6,7 +6,7 @@ import json
 import jsonlines
 import pandas as pd
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 from src.constant import (
     DATA_DIR,
     MSB_JAVA_DIR,
@@ -356,6 +356,36 @@ class PatchDataLoader:
         
         with open(patch_path, 'r', encoding='utf-8', errors='ignore') as f:
             return f.read()
+    
+    def get_modified_lines(self, agent_name: str, instance_id: str) -> int:
+        """
+        Get agent patch modified lines count (added + deleted).
+        
+        Args:
+            agent_name: Name of the agent
+            instance_id: Instance ID
+            
+        Returns:
+            Total number of lines changed (added + deleted)
+        """
+        from src.utils.patch_utils import get_patch_size
+        patch_path = self.get_patch_path(agent_name, instance_id)
+        return get_patch_size(str(patch_path))
+    
+    def get_modified_files(self, agent_name: str, instance_id: str) -> int:
+        """
+        Get agent patch modified files count.
+        
+        Args:
+            agent_name: Name of the agent
+            instance_id: Instance ID
+            
+        Returns:
+            Number of modified files
+        """
+        from src.utils.patch_utils import get_modified_files_from_patch
+        patch_path = self.get_patch_path(agent_name, instance_id)
+        return get_modified_files_from_patch(str(patch_path))
 
 
 class GoldenPatchLoader:

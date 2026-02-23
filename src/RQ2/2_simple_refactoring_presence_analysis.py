@@ -9,6 +9,7 @@ import numpy as np
 import json
 import sys
 from pathlib import Path
+from typing import Dict, Any
 import statsmodels.api as sm
 from sklearn.preprocessing import StandardScaler
 import warnings
@@ -129,18 +130,147 @@ class SimpleRefactoringAnalysis:
         all_vars = ['agent_has_refactoring'] + control_vars
         X = self.df_encoded[all_vars].copy()
         y = self.df_encoded[outcome_var]
-        
+
+        # Keep a copy before fillna for variable-specific N calculation
+        X_before_fillna = X.copy()
+
         X = X.fillna(0)
         X = sm.add_constant(X)
-        
+
         # Fit model
         model = sm.Logit(y, X).fit(disp=0)
-        
+
         # Calculate metrics
         mcfadden_r2 = 1 - (model.llf / model.llnull)
         adj_mcfadden_r2 = 1 - ((model.llf - model.df_model) / (model.llnull - 1))
-        
-        return model, mcfadden_r2, adj_mcfadden_r2
+
+        return {
+            'model': model,
+            'outcome_var': outcome_var,
+            'treatment_vars': ['agent_has_refactoring'],
+            'control_vars': control_vars,
+            'n_obs': int(model.nobs),
+            'X_data': X_before_fillna,
+            'mcfadden_r2': mcfadden_r2,
+            'adj_mcfadden_r2': adj_mcfadden_r2,
+            'aic': model.aic,
+            'bic': model.bic
+        }
+
+    def _clean_variable_name(self, var: str) -> str:
+        """Remove _scaled suffix for display consistency."""
+        if var == 'const':
+            return var
+        if var.endswith('_scaled'):
+            return var.replace('_scaled', '')
+        return var
+
+    def extract_results_table(self, model_results: Dict[str, Any]) -> pd.DataFrame:
+        """Extract detailed variable-level table with N per variable."""
+        model = model_results['model']
+        treatment_vars = model_results['treatment_vars']
+        X_data = model_results['X_data']
+
+        results_data = []
+        for var in model.params.index:
+            is_treatment = any(var == tvar for tvar in treatment_vars)
+            is_const = (var == 'const')
+
+            if is_const:
+                var_type = 'Intercept'
+            elif is_treatment:
+                var_type = 'Treatment'
+            else:
+                var_type = 'Control'
+
+            if var == 'const':
+                n_obs_var = int(model.nobs)
+            elif var in X_data.columns:
+                non_na_series = X_data[var].dropna()
+                if non_na_series.nunique() > 0 and set(non_na_series.unique()).issubset({0, 1}):
+                    n_obs_var = int((X_data[var] == 1).sum())
+                else:
+                    n_obs_var = int(X_data[var].notna().sum())
+            else:
+                n_obs_var = int(model.nobs)
+
+            p_val = model.pvalues[var]
+            if p_val < 0.001:
+                p_formatted = f"{p_val:.2e}"
+                significant = '***'
+            elif p_val < 0.01:
+                p_formatted = f"{p_val:.3f}"
+                significant = '**'
+            elif p_val < 0.05:
+                p_formatted = f"{p_val:.3f}"
+                significant = '*'
+            else:
+                p_formatted = f"{p_val:.3f}"
+                significant = ''
+
+            if var == 'const':
+                odds_ratio = np.nan
+                or_ci_lower = np.nan
+                or_ci_upper = np.nan
+            else:
+                odds_ratio = np.exp(model.params[var])
+                or_ci_lower = np.exp(model.conf_int()[0][var])
+                or_ci_upper = np.exp(model.conf_int()[1][var])
+
+            results_data.append({
+                'Variable': self._clean_variable_name(var),
+                'Original_Variable': var,
+                'Type': var_type,
+                'N_Observations': n_obs_var,
+                'Estimate': model.params[var],
+                'Std_Error': model.bse[var],
+                'P_value': p_val,
+                'P_value_formatted': p_formatted,
+                'CI_Lower': model.conf_int()[0][var],
+                'CI_Upper': model.conf_int()[1][var],
+                'Odds_Ratio': odds_ratio,
+                'OR_CI_Lower': or_ci_lower,
+                'OR_CI_Upper': or_ci_upper,
+                'Significant': significant
+            })
+
+        return pd.DataFrame(results_data)
+
+    def display_model_results(self, detailed_results: pd.DataFrame):
+        """Display treatment and all control variables, aligned with script 3."""
+        results_no_intercept = detailed_results[detailed_results['Variable'] != 'const'].copy()
+        treatment_results = results_no_intercept[results_no_intercept['Type'] == 'Treatment']
+        control_results = results_no_intercept[results_no_intercept['Type'] == 'Control']
+
+        if not treatment_results.empty:
+            print(f"\n{'Treatment Variables':-^80}")
+            print(f"{'Variable':<30} {'N_Obs':<8} {'Estimate':<12} {'Odds Ratio':<12} {'95% CI':<25} {'P-Value':<12} {'Sig.':<5}")
+            print("-" * 80)
+            for _, row in treatment_results.iterrows():
+                p_val = row['P_value']
+                sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else ""
+                estimate_str = f"{row['Estimate']:.4f}"
+                or_str = f"{row['Odds_Ratio']:.4f}"
+                ci_str = f"[{row['OR_CI_Lower']:.4f}, {row['OR_CI_Upper']:.4f}]"
+                p_formatted = f"{p_val:.4f}" if p_val >= 0.001 else f"{p_val:.2e}"
+                n_obs = f"{row['N_Observations']:,}"
+                print(f"{row['Variable']:<30} {n_obs:<8} {estimate_str:<12} {or_str:<12} {ci_str:<25} {p_formatted:<12} {sig:<5}")
+
+        if not control_results.empty:
+            print(f"\n{'Control Variables (All Variables)':-^80}")
+            print(f"{'Variable':<30} {'N_Obs':<8} {'Estimate':<12} {'Odds Ratio':<12} {'P-Value':<12} {'Sig.':<5}")
+            print("-" * 80)
+            for _, row in control_results.iterrows():
+                p_val = row['P_value']
+                sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else ""
+                estimate_str = f"{row['Estimate']:.4f}"
+                or_str = f"{row['Odds_Ratio']:.4f}"
+                p_formatted = f"{p_val:.4f}" if p_val >= 0.001 else f"{p_val:.2e}"
+                n_obs = f"{row['N_Observations']:,}"
+                print(f"{row['Variable']:<30} {n_obs:<8} {estimate_str:<12} {or_str:<12} {p_formatted:<12} {sig:<5}")
+
+            significant_count = len(control_results[control_results['P_value'] < 0.05])
+            print(f"\nTotal control variables: {len(control_results)}, Significant (p < 0.05): {significant_count}")
     
     def run_analysis(self):
         """Run complete analysis"""
@@ -166,39 +296,39 @@ class SimpleRefactoringAnalysis:
             outcomes.append(('is_compile_ok_binary', 'is_compile_ok'))
         
         results_summary = []
+        detailed_results_by_outcome = {}
         
         for outcome_var, outcome_name in outcomes:
             print(f"\n{'='*80}")
             print(f"OUTCOME: {outcome_name.upper()}")
             print(f"{'='*80}")
             
-            model, r2, adj_r2 = self.fit_model(outcome_var)
-            
+            model_results = self.fit_model(outcome_var)
+            model = model_results['model']
+            r2 = model_results['mcfadden_r2']
+            adj_r2 = model_results['adj_mcfadden_r2']
+
             print(f"\nModel Statistics:")
             print(f"  Observations: {int(model.nobs)}")
             print(f"  McFadden R²: {r2:.4f}")
             print(f"  Adjusted McFadden R²: {adj_r2:.4f}")
             print(f"  AIC: {model.aic:.2f}")
             print(f"  BIC: {model.bic:.2f}")
-            
-            # Extract agent_has_refactoring coefficient
-            coef = model.params['agent_has_refactoring']
-            se = model.bse['agent_has_refactoring']
-            pval = model.pvalues['agent_has_refactoring']
-            ci_lower, ci_upper = model.conf_int().loc['agent_has_refactoring']
-            
-            # Calculate odds ratio
-            odds_ratio = np.exp(coef)
-            or_ci_lower = np.exp(ci_lower)
-            or_ci_upper = np.exp(ci_upper)
-            
-            sig = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else ""
-            
-            print(f"\n{'Treatment Variable: agent_has_refactoring':-^80}")
-            print(f"  Coefficient (log-odds): {coef:.4f} (SE: {se:.4f})")
-            print(f"  Odds Ratio: {odds_ratio:.4f}")
-            print(f"  95% CI for OR: [{or_ci_lower:.4f}, {or_ci_upper:.4f}]")
-            print(f"  P-value: {pval:.6f} {sig}")
+
+            detailed_results = self.extract_results_table(model_results)
+            detailed_results_by_outcome[outcome_name] = {
+                'model_results': model_results,
+                'detailed_results': detailed_results
+            }
+
+            self.display_model_results(detailed_results)
+
+            treatment_row = detailed_results[detailed_results['Original_Variable'] == 'agent_has_refactoring'].iloc[0]
+            coef = treatment_row['Estimate']
+            pval = treatment_row['P_value']
+            odds_ratio = treatment_row['Odds_Ratio']
+            or_ci_lower = treatment_row['OR_CI_Lower']
+            or_ci_upper = treatment_row['OR_CI_Upper']
             
             # Store results
             results_summary.append({
@@ -208,7 +338,10 @@ class SimpleRefactoringAnalysis:
                 'or_ci_lower': or_ci_lower,
                 'or_ci_upper': or_ci_upper,
                 'p_value': pval,
-                'significant': sig != ''
+                'mcfadden_r2': r2,
+                'adj_mcfadden_r2': adj_r2,
+                'n_observations': int(model.nobs),
+                'significant': bool(pval < 0.05)
             })
             
             # Interpretation
@@ -254,12 +387,12 @@ class SimpleRefactoringAnalysis:
         print("="*80)
         
         # Save results
-        self.save_results(results_summary)
+        self.save_results(results_summary, detailed_results_by_outcome)
         
         # Restore stdout and close log file
         tee.close()
     
-    def save_results(self, results_summary):
+    def save_results(self, results_summary, detailed_results_by_outcome):
         """Save results to file"""
         output_dir = Path("output/RQ2/simple_refactoring_analysis")
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -271,11 +404,42 @@ class SimpleRefactoringAnalysis:
         # Save summary as CSV
         df_results = pd.DataFrame(results_summary)
         df_results.to_csv(output_dir / 'summary.csv', index=False)
+
+        # Save detailed results and model statistics for each outcome
+        for outcome_name, result_bundle in detailed_results_by_outcome.items():
+            if outcome_name == 'is_issue_solved':
+                outcome_suffix = 'is_issue_solved'
+            elif outcome_name == 'is_compile_ok':
+                outcome_suffix = 'is_compile_ok'
+            else:
+                outcome_suffix = outcome_name
+
+            detailed_csv_path = output_dir / f"detailed_results_{outcome_suffix}.csv"
+            result_bundle['detailed_results'].to_csv(detailed_csv_path, index=False)
+
+            model_results = result_bundle['model_results']
+            stats = {
+                'outcome': outcome_name,
+                'n_observations': model_results['n_obs'],
+                'mcfadden_r2': model_results['mcfadden_r2'],
+                'adj_mcfadden_r2': model_results['adj_mcfadden_r2'],
+                'aic': model_results['aic'],
+                'bic': model_results['bic']
+            }
+            stats_json_path = output_dir / f"model_statistics_{outcome_suffix}.json"
+            with open(stats_json_path, 'w') as f:
+                json.dump(stats, f, indent=2)
         
         print(f"\nResults saved to {output_dir}/")
         print(f"  - analysis_output.txt")
         print(f"  - summary.json")
         print(f"  - summary.csv")
+        print(f"  - detailed_results_is_issue_solved.csv")
+        if self.has_compile_data:
+            print(f"  - detailed_results_is_compile_ok.csv")
+        print(f"  - model_statistics_is_issue_solved.json")
+        if self.has_compile_data:
+            print(f"  - model_statistics_is_compile_ok.json")
 
 def main():
     """Main function"""
