@@ -6,7 +6,6 @@ output/
 doc/
 
 # 环境变量和配置
-env.sh
 .env
 .env.local
 *.env

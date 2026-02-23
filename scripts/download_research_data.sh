@@ -177,6 +177,8 @@ download_file() {
 download_file "java_experiment.zip"
 download_file "refactoring_classification.xlsx"
 download_file "issue_types.xlsx"
+download_file "index.json"
+download_file "evaluation_logs_new.zip"
 
 echo "Dataset available at ${EXP_DIR}"
 
