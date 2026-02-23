@@ -126,12 +126,27 @@ if ! command -v git-lfs >/dev/null 2>&1; then
   exit 1
 fi
 
+# Pinned commit for reproducibility.
+: "${MULTI_SWE_BENCH_REVISION:=f03578e85b6a54a0df802d59dd28967c1078e393}"
+
 MSB_DIR="${DATA_DIR}/Multi-SWE-bench"
+MSB_REPO="https://huggingface.co/datasets/ByteDance-Seed/Multi-SWE-bench"
+
 if [[ -d "${MSB_DIR}/.git" ]]; then
-  echo "Multi-SWE-bench already exists at ${MSB_DIR}. Skipping download."
+  echo "Multi-SWE-bench already exists at ${MSB_DIR}. Skipping clone."
+  if [[ -n "${MULTI_SWE_BENCH_REVISION}" ]]; then
+    echo "Checking out revision: ${MULTI_SWE_BENCH_REVISION}"
+    git -C "${MSB_DIR}" fetch origin
+    git -C "${MSB_DIR}" checkout "${MULTI_SWE_BENCH_REVISION}"
+    git -C "${MSB_DIR}" lfs pull
+  fi
 else
   git lfs install
-  git clone https://huggingface.co/datasets/ByteDance-Seed/Multi-SWE-bench "${MSB_DIR}"
+  git clone "${MSB_REPO}" "${MSB_DIR}"
+  if [[ -n "${MULTI_SWE_BENCH_REVISION}" ]]; then
+    echo "Checking out revision: ${MULTI_SWE_BENCH_REVISION}"
+    git -C "${MSB_DIR}" checkout "${MULTI_SWE_BENCH_REVISION}"
+  fi
   git -C "${MSB_DIR}" lfs pull
 fi
 
