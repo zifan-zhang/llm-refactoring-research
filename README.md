@@ -28,13 +28,13 @@ Run in order:
 1. **Apply patches**  
    `python -m src.core.0_patch_applier`
 
-2. **Golden refactorings**  
+2. **Golden refactorings detection**  
    `python -m src.core.1_golden_refactoring_detector`
 
-3. **Agent refactorings**  
+3. **Agent refactorings detection**  
    `python -m src.core.2_agent_refactoring_detector`
 
-4. **Unified dataset**  
+4. **Create unified dataset**  
    `python -m src.core.3_unified_data_builder`  
    → writes `data/unified_data.csv`  
    **Then manually remove the two outlier rows** (version-rollback patches): rows where `(instance_id, agent_name)` is `(fasterxml__jackson-databind-4320, MopenHands_Gemini-2.5-Pro)` and `(fasterxml__jackson-databind-4087, MopenHands_Gemini-2.5-Pro)`. See `doc/outlier_investigation_report.md`.
@@ -70,7 +70,3 @@ Run in order:
 - Multi-SWE-bench (Java): Hugging Face `ByteDance-Seed/Multi-SWE-bench`
 - Experiment artifacts: Hugging Face `Azusa434/LLM-Refactoring-Research`
 - RefactoringMiner: [tsantalis/RefactoringMiner](https://github.com/tsantalis/RefactoringMiner) v3.0.13
-
-## Outlier handling
-
-Two version-rollback patches (OpenHands + Gemini-2.5-Pro on jackson-databind) are excluded from refactoring stats. See `doc/outlier_investigation_report.md`.
