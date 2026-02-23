@@ -70,3 +70,7 @@ Run in order:
 - Multi-SWE-bench (Java): Hugging Face `ByteDance-Seed/Multi-SWE-bench`
 - Experiment artifacts: Hugging Face `Azusa434/LLM-Refactoring-Research`
 - RefactoringMiner: [tsantalis/RefactoringMiner](https://github.com/tsantalis/RefactoringMiner) v3.0.13
+
+## Our fixed version of Multi-SWE-bench's evaluation framework: https://github.com/zifan-zhang/mswebench-reproduce
+
+- Used to evaluate the original agent patches, golden patches and refined agent patches for java instances.
