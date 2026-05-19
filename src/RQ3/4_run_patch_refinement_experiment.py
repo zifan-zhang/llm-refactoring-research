@@ -28,6 +28,23 @@ from src.data_loader import (
 from src.RQ3.refinement_prompt import build_patch_refinement_prompt
 
 
+# Provider presets: maps provider name to default base_url and model
+PROVIDER_CONFIGS: Dict[str, Dict[str, str]] = {
+    "deepseek": {
+        "base_url": "https://api.deepseek.com",
+        "default_model": "deepseek-chat",
+    },
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "default_model": "gpt-4o",
+    },
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "default_model": "gemini-2.0-flash",
+    },
+}
+
+
 @dataclass
 class RefinementInput:
     """Input data for a single refinement task"""
@@ -61,6 +78,7 @@ class PatchRefinementExperiment:
         assessment_results_path: Path,
         model: str = "deepseek-chat",
         base_url: str = "https://api.deepseek.com",
+        provider: str = "deepseek",
         output_dir: Optional[Path] = None,
         api_delay: float = 0.5,
     ):
@@ -72,11 +90,14 @@ class PatchRefinementExperiment:
             assessment_results_path: Path to assessment results JSON file
             model: Model name to use
             base_url: API base URL
+            provider: Provider name (deepseek / openai / gemini), used for
+                      provider-specific message formatting
             output_dir: Output directory for results
             api_delay: Delay between API calls in seconds
         """
         self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
+        self.provider = provider.lower()
         self.api_delay = api_delay
         
         if output_dir is None:
@@ -229,19 +250,42 @@ class PatchRefinementExperiment:
             refactoring_assessments=assessments_json,
         )
         
-        # Prepare messages for API
-        messages = [
-            {"role": "system", "content": prompt_messages.global_system},
-            {"role": "system", "content": prompt_messages.system},
-            {"role": "user", "content": prompt_messages.user},
-        ]
-        
-        # Add example if available
-        if prompt_messages.example_json:
-            messages.append({
-                "role": "assistant",
-                "content": f"Here's an example of the expected diff format:\n\n{prompt_messages.example_json}"
-            })
+        # Gemini's OpenAI-compatible endpoint only supports a single system
+        # message, so merge both system prompts into one.
+        if self.provider == "gemini":
+            merged_system = (
+                prompt_messages.global_system
+                + "\n\n"
+                + prompt_messages.system
+            )
+            messages = [
+                {"role": "system", "content": merged_system},
+                {"role": "user", "content": prompt_messages.user},
+            ]
+            # Append the example as an extra user turn to avoid relying on
+            # an assistant prefill that Gemini may not support.
+            if prompt_messages.example_json:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "For reference, here is an example of the expected "
+                        "diff output format:\n\n```diff\n"
+                        + prompt_messages.example_json
+                        + "\n```"
+                    ),
+                })
+        else:
+            # Standard OpenAI-compatible message layout
+            messages = [
+                {"role": "system", "content": prompt_messages.global_system},
+                {"role": "system", "content": prompt_messages.system},
+                {"role": "user", "content": prompt_messages.user},
+            ]
+            if prompt_messages.example_json:
+                messages.append({
+                    "role": "assistant",
+                    "content": f"Here's an example of the expected diff format:\n\n{prompt_messages.example_json}"
+                })
         
         # Retry loop with exponential backoff
         for attempt in range(max_retries):
@@ -591,16 +635,48 @@ def find_latest_assessment_file(assessment_dir: Path) -> Optional[Path]:
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description="Run patch refinement experiment"
+        description="Run patch refinement experiment",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="\n".join([
+            "Provider presets (--provider) and their defaults:",
+            *[
+                f"  {name:10s}  base-url={cfg['base_url']}  model={cfg['default_model']}"
+                for name, cfg in PROVIDER_CONFIGS.items()
+            ],
+            "",
+            "Examples:",
+            "  # DeepSeek (default)",
+            "  python -m src.RQ3.4_run_patch_refinement_experiment \\",
+            "      --provider deepseek --api-key <KEY>",
+            "",
+            "  # Gemini",
+            "  python -m src.RQ3.4_run_patch_refinement_experiment \\",
+            "      --provider gemini --api-key <GEMINI_KEY>",
+            "",
+            "  # Gemini with a specific model",
+            "  python -m src.RQ3.4_run_patch_refinement_experiment \\",
+            "      --provider gemini --model gemini-1.5-pro --api-key <GEMINI_KEY>",
+        ]),
     )
     
     parser.add_argument(
         "--api-key",
         type=str,
         required=True,
-        help="API key for LLM service"
+        help="API key for the chosen LLM provider",
     )
     
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default="deepseek",
+        choices=list(PROVIDER_CONFIGS.keys()),
+        help=(
+            "LLM provider preset; sets default base-url and model "
+            "(default: deepseek)"
+        ),
+    )
+
     parser.add_argument(
         "--assessment-results",
         type=str,
@@ -611,15 +687,21 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="deepseek-chat",
-        help="Model to use (default: deepseek-chat)"
+        default=None,
+        help=(
+            "Model name to use. Defaults to the provider's default model "
+            "when not specified."
+        ),
     )
     
     parser.add_argument(
         "--base-url",
         type=str,
-        default="https://api.deepseek.com",
-        help="API base URL (default: https://api.deepseek.com)"
+        default=None,
+        help=(
+            "API base URL. Defaults to the provider's base URL when not "
+            "specified."
+        ),
     )
     
     parser.add_argument(
@@ -645,6 +727,15 @@ def main():
     
     args = parser.parse_args()
     
+    # Resolve base_url and model from provider preset when not explicitly given
+    provider_cfg = PROVIDER_CONFIGS[args.provider]
+    resolved_base_url = args.base_url or provider_cfg["base_url"]
+    resolved_model = args.model or provider_cfg["default_model"]
+
+    print(f"Provider : {args.provider}")
+    print(f"Model    : {resolved_model}")
+    print(f"Base URL : {resolved_base_url}")
+    
     # Determine assessment results file
     if args.assessment_results:
         assessment_results_path = Path(args.assessment_results)
@@ -668,8 +759,9 @@ def main():
     experiment = PatchRefinementExperiment(
         api_key=args.api_key,
         assessment_results_path=assessment_results_path,
-        model=args.model,
-        base_url=args.base_url,
+        model=resolved_model,
+        base_url=resolved_base_url,
+        provider=args.provider,
         output_dir=Path(args.output_dir) if args.output_dir else None,
         api_delay=args.api_delay,
     )
