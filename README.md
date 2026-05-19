@@ -1,4 +1,4 @@
-# An Empirical Study of Code Agent Refactoring in Tangled Commits on Multi-SWE-bench Java Projects
+# Beware of Refactoring Runaway: An Empirical Study of Tangled Refactorings in Coding Agents for Issue Resolution
 
 Reproduction guide for the experiment
 
