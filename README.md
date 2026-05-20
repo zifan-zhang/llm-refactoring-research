@@ -1,4 +1,4 @@
-# Beware of Refactoring Runaway: An Empirical Study of Tangled Refactorings in Coding Agents for Issue Resolution
+# "Refactoring Runaway": Understanding and Mitigating Tangled Refactorings in Coding Agents for Issue Resolution
 
 Reproduction guide for the experiment
 
